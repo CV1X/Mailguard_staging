@@ -8,6 +8,54 @@
      Istoricul pre-release (v0.x) păstrat mai jos pentru referință.
 -->
 
+## v2.7.0 - 2026-08-12
+
+### Integrare Git + deploy prin pull
+
+Codul aplicației trăiește acum în `git@github.com:Raul-Covaci/Mailguard_staging.git`
+(privat). Deploy-ul nu se mai face prin rsync din workspace-ul IRIS, ci prin
+`git pull` pe server — se lucrează local, se împinge, serverul trage.
+
+**Repo:** 315 fișiere, ~7 MB (din 1,2 GB pe disc).
+
+**Excluse deliberat** (`.gitignore`, cu motivul lângă fiecare regulă):
+`.env` + `app/.env` + deploy key (secrete) · `data/doc_templates/` 114 MB
+(41 documente reale de client) · `logs/` 684 MB · `venv/` 238 MB ·
+`backups/` + `storage/` (dump-uri, symlink spre `/home/mail-data`) ·
+~90 fișiere `*.bak*` 65 MB · fișierele specifice mediului IRIS
+(`deploy.sh`, `CLAUDE.md`, `OUTBOX_*`, `.iris_*`).
+
+`app/ui/vendor/mg-app.js.gz` **rămâne** în repo — nu e artefact de build,
+aplicația îl servește direct din `_GZIP_FILES` (`app/main.py`).
+
+**Autentificare:** deploy key ed25519 în `/opt/iris-mailguard/deploy/`, cu
+`core.sshCommand` și `IdentitiesOnly=yes`. Partea privată nu părăsește serverul.
+
+**`deploy-pull.sh`** (nou): oprire dacă arborele are modificări necommitate
+(`--force` trece peste) → backup DB `pg_dump -Fc` din container, retenție 10 →
+`pull --ff-only`, fără `reset --hard` automat la istoric divergent → `pip` doar
+dacă `requirements.txt` s-a schimbat între revizii → regenerare `mg-app.js.gz`
+dacă sursa e mai nouă → restart (migrările rulează fail-fast prin
+`ExecStartPre`) → health check pe `/healthz`, cu comanda de rollback și calea
+backup-ului afișate la eșec.
+
+**`DEPLOY.md`** (nou): fluxul zilnic, tabel cu ce se propagă prin push și ce nu,
+bootstrap pe server nou (inclusiv drop-in-ul `10-migrate.conf`, care nu e în
+repo și fără care migrările nu se aplică), depanare.
+
+**`.env.example`** (nou): 52 de variabile documentate, zero valori.
+
+**Auditul de secrete:** curat. Toate cheile se citesc din environment
+(`os.getenv` / pydantic `BaseSettings`); zero literale în cod.
+
+**Două capcane prinse la verificare:**
+- `git add` a eșuat cu `dubious ownership`, iar căutarea de fișiere sensibile a
+  raportat „curat" — indexul era gol, nu curat. De aceea verificarea cere și
+  numărul de fișiere.
+- `mg-app.js.bak20260722_v3` a trecut prin filtre: `.bak` lipit direct de dată,
+  fără separator. Regula acoperea `.bak-`, `.bak_`, `.bak.`, dar nu varianta
+  lipită. Corectat cu `*.bak*`.
+
 ## v2.6.1 - 2026-08-12
 
 ### Închiderea modulelor interzise la nivel de server (nu doar în meniu)
