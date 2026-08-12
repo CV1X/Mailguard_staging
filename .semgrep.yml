@@ -1,0 +1,5 @@
+rules:
+  - id: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+    paths:
+      exclude:
+        - "*"

@@ -1,0 +1,10 @@
+[Unit]
+Description=MailGuard personal mailbox poll tick
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/iris-mailguard
+ExecStart=/usr/bin/curl -sS -X POST "http://127.0.0.1:8500/api/v1/personal-mailboxes/poll"
+StandardOutput=journal
+StandardError=journal

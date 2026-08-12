@@ -1,0 +1,5 @@
+# backup-uri istorice, nu cod live
+*.bak-*
+*.backup-*
+CLAUDE-HISTORY.md*
+CHANGELOG.md.bak-*

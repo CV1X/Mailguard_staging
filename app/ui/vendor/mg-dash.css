@@ -1,0 +1,18 @@
+:root {
+  --bg:#0a0e16; --bg2:#0e131c; --bg3:#161c28; --bd:#1f2937;
+  --tx:#e6edf3; --t2:#a3adba; --t3:#6b7280;
+  --am:#4cc3ff; --gn:#10b981; --yw:#f59e0b; --rd:#ef4444; --bl:#3b82f6;
+  --r:8px; --r-sm:6px;
+}
+[data-theme="light"] {
+  --bg:#f1f5f9; --bg2:#ffffff; --bg3:#e8edf5; --bd:#d1d9e6;
+  --tx:#0f172a; --t2:#475569; --t3:#94a3b8;
+  --am:#0284c7; --gn:#059669; --yw:#d97706; --rd:#dc2626; --bl:#2563eb;
+}
+html,body { margin:0; padding:0; background:var(--bg); color:var(--tx); font-family:'Inter',system-ui,sans-serif; font-size:13px; height:100%; overflow:hidden; }
+* { box-sizing:border-box; }
+#root { height:100%; }
+/* puls indicator LIVE — pur decorativ (nu reprezintă date) */
+@keyframes mg-beat { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:.35; transform:scale(.72); } }
+.mg-beat { animation: mg-beat 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .mg-beat { animation: none; } }

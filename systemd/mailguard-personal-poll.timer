@@ -1,0 +1,10 @@
+[Unit]
+Description=MailGuard personal mailbox poll every minute
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1min
+Unit=mailguard-personal-poll.service
+
+[Install]
+WantedBy=timers.target

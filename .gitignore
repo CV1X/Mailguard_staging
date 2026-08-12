@@ -1,0 +1,116 @@
+# .gitignore — MailGuard / Cargo360
+#
+# REGULA: in repo intra DOAR cod. Niciodata secrete, baza de date sau
+# documentele clientilor. O scurgere e ireversibila — rescrierea istoricului
+# nu sterge ce a fost deja clonat sau indexat.
+
+# ---------------------------------------------------------------------------
+# SECRETE — chei API (OpenAI/Anthropic), credentiale DB, cheie IRIS SSO, CTS token.
+# Doua locatii reale: radacina si app/.env (ambele citite de aplicatie).
+# ---------------------------------------------------------------------------
+.env
+.env.*
+app/.env
+app/.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*credential*.json
+# deploy key generata pe server (partea privata NU pleaca de acolo)
+deploy/
+
+# ---------------------------------------------------------------------------
+# BAZA DE DATE si dump-uri — date reale (emailuri, clienti, angajati).
+# DB-ul ruleaza in containerul mailguard-db, nu in arbore; dar dump-urile ajung aici.
+# ---------------------------------------------------------------------------
+*.dump
+*.sql.gz
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+backups/
+
+# ---------------------------------------------------------------------------
+# DATE DE CLIENT — 114 MB de PDF/JPEG reale (facturi, scanuri, documente).
+# storage/backups e symlink spre /home/mail-data — iese complet din arbore.
+# ---------------------------------------------------------------------------
+data/doc_templates/
+storage/
+attachments/
+uploads/
+
+# ---------------------------------------------------------------------------
+# ARTEFACTE REPRODUCTIBILE
+# ---------------------------------------------------------------------------
+venv/
+env/
+.venv/
+node_modules/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------------------------------------------------------------------------
+# LOGURI — 684 MB pe server; contin adrese de email si continut de mesaje.
+# ---------------------------------------------------------------------------
+logs/
+*.log
+*.log.*
+
+# ---------------------------------------------------------------------------
+# BACKUP-URI MANUALE — ~90 fisiere, 65 MB (40+ copii de mg-app.js).
+# Git face istoricul; copiile cu timestamp devin zgomot.
+# Atentie la variantele de sufix: _  .  -  si LIPIT (toate patru au fost folosite;
+# ex. mg-app.js.bak20260722_v3 scapa de *.bak-* si de *.bak_*).
+# ---------------------------------------------------------------------------
+*.bak
+*.bak*
+*.backup
+*.backup-*
+*.backup_*
+*.orig
+*.rej
+*~
+
+# ---------------------------------------------------------------------------
+# SPECIFIC MEDIULUI DE LUCRU IRIS — nu apartin aplicatiei.
+# Intr-un clone curat ar induce in eroare (deploy.sh face rsync din workspace-ul
+# IRIS, nu pull din Git).
+# ---------------------------------------------------------------------------
+deploy.sh
+deploy_vendor.sh
+deploy_changelog.sh
+deploy_t4.sh
+.iris_remote_fingerprint*
+.iris_last_sync
+.design_lint_baseline*
+OUTBOX_*
+CLAUDE.md
+CLAUDE-HISTORY.md
+.claude/
+.lint/
+
+# ---------------------------------------------------------------------------
+# SCRIPTURI TEMPORARE de investigatie (au ramas in arbore din sesiuni vechi)
+# ---------------------------------------------------------------------------
+sim20.py
+sim_topup.py
+tmp_*.py
+
+# ---------------------------------------------------------------------------
+# SISTEM / EDITOR
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

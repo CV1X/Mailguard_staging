@@ -1,0 +1,104 @@
+{
+  "_comment": "Customer Health Score v2 — configurație piloni și ponderi. Editabil fără restart (reîncărcat per calcul).",
+
+  "version": "2.0",
+
+  "decay_half_life_days": 45,
+  "max_history_days": 365,
+  "baseline_window_days": 90,
+
+  "segment_thresholds": {
+    "sanatos":  70.0,
+    "neutru":   45.0,
+    "la_risc":  25.0
+  },
+
+  "pillars": {
+    "emotion": {
+      "weight": 0.30,
+      "description": "Valența emoțională din interacțiuni (sentiment + intensitate)"
+    },
+    "effort": {
+      "weight": 0.25,
+      "description": "Efortul clientului de a rezolva probleme (repetări, follow-up, timpi răspuns)"
+    },
+    "operational": {
+      "weight": 0.25,
+      "description": "Calitatea rezolvărilor operaționale (taskuri, promisiuni, probleme repetate)"
+    },
+    "relationship": {
+      "weight": 0.20,
+      "description": "Sănătatea relațională (căldură, orientare viitoare, dezangajare)"
+    }
+  },
+
+  "emotion": {
+    "sentiment_weight": 0.70,
+    "emotional_intensity_penalty_factor": 0.15,
+    "neutral_baseline": 0.65
+  },
+
+  "effort": {
+    "repeat_issue_penalty": 0.25,
+    "effort_signal_penalty_per_unit": 0.10,
+    "max_effort_penalty": 0.40,
+    "resolution_bonus": {
+      "rezolvat": 0.10,
+      "rezolvat_pe_loc": 0.15,
+      "in_lucru": 0.0,
+      "promisiune_follow_up": -0.05,
+      "nerezolvat": -0.15,
+      "n/a": 0.0,
+      "informativ": 0.0
+    }
+  },
+
+  "operational": {
+    "firefighting_window_days": 30,
+    "max_firefighting_tasks": 5,
+    "overdue_open_threshold_days": 7,
+    "max_overdue_tasks": 3,
+    "reopened_penalty_per_task": 0.10,
+    "max_reopened_penalty": 0.30
+  },
+
+  "relationship": {
+    "warmth_weight": 0.50,
+    "future_orientation_bonus": 0.10,
+    "asks_questions_bonus": 0.05,
+    "praise_flag_bonus_per_flag": 0.08,
+    "silence_threshold_ratio": 0.40,
+    "silence_window_days": 60,
+    "silence_penalty": 0.25,
+    "warmth_baseline_deviation_weight": 0.30
+  },
+
+  "override_rules": [
+    {
+      "red_flags": ["mentiune_reziliere", "amenintare_legala", "ultimatum", "escaladare_management"],
+      "window_days": 30,
+      "force_segment": "critic",
+      "description": "Semnal imediat de pierdere client"
+    },
+    {
+      "red_flags": ["mentiune_concurenta", "mentiune_penalitati_contract", "cerere_export_date"],
+      "window_days": 60,
+      "min_segment": "la_risc",
+      "description": "Semnal de risc moderat"
+    }
+  ],
+
+  "service_recovery": {
+    "enabled": true,
+    "window_days": 5,
+    "negative_weight_reduction": 0.30,
+    "requires_resolution_signal": ["rezolvat", "rezolvat_pe_loc"],
+    "requires_positive_sentiment_threshold": 0.2
+  },
+
+  "confidence": {
+    "min_interactions_full": 10,
+    "min_interactions_partial": 3,
+    "low_confidence_label": "date_insuficiente"
+  }
+}

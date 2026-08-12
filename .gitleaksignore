@@ -1,0 +1,4 @@
+# .env live + backup-uri — secrete config pe disk, nu leak in cod/git history.
+# Backup-urile oricum eliminate progresiv (vezi CHANGELOG v0.70.1).
+.env
+.env.bak-*

@@ -1,0 +1,1 @@
+try{var _t=localStorage.getItem('mg-theme')||'dark';document.documentElement.setAttribute('data-theme',_t);}catch(e){}

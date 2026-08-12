@@ -1,0 +1,25 @@
+[Unit]
+Description=IRIS MailGuard API (FastAPI + Gunicorn)
+After=network.target docker.service
+Requires=network.target
+
+[Service]
+Type=notify
+User=root
+WorkingDirectory=/opt/iris-mailguard
+EnvironmentFile=/opt/iris-mailguard/.env
+ExecStart=/opt/iris-mailguard/venv/bin/gunicorn \
+    -k uvicorn.workers.UvicornWorker \
+    -w 4 \
+    -b 127.0.0.1:8500 \
+    --timeout 60 \
+    --access-logfile /opt/iris-mailguard/logs/access.log \
+    --error-logfile /opt/iris-mailguard/logs/error.log \
+    app.main:app
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
