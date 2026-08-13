@@ -16,6 +16,7 @@ from app.api.v1 import personal_mailboxes as personal_mailboxes_api
 from app.api.v1 import iris_dv as iris_dv_api
 from app.api.v1 import cts_sync_control as cts_sync_control_api
 from app.api.v1 import noreply as noreply_api
+from app.api.v1 import db_export
 from app.api.graph import messages as graph_messages
 from app.services import access_control as _ac
 
@@ -92,6 +93,9 @@ app.include_router(cts.router, prefix="/api/v1", tags=["cts"])
 app.include_router(cts_training.router, prefix="/api/v1", tags=["cts_training"],
                    dependencies=[Depends(_ac.require_module("cts-training"))])
 app.include_router(admin_reset.router, prefix="/api/v1", tags=["admin_reset"],
+                   dependencies=[Depends(_ac.require_role(_ac.ROLE_DEVELOPER))])
+# Export DB pentru dezvoltare locala — doar developer (paza si in router, dubla).
+app.include_router(db_export.router, prefix="/api/v1", tags=["db_export"],
                    dependencies=[Depends(_ac.require_role(_ac.ROLE_DEVELOPER))])
 app.include_router(personal_mailboxes_api.router, prefix="/api/v1", tags=["personal_mailboxes"],
                    dependencies=[Depends(_ac.require_module("personal-mailboxes"))])

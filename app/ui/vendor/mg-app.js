@@ -8278,9 +8278,124 @@ Dacă nu doriți să mai primiți emailuri automate de la această adresă, pute
   ]);
 }
 
-function Settings() {
+// Export baza de date pentru dezvoltare locala. Doar developer (vezi Settings).
+// Fisierul are ~195 MB: exportul ruleaza in fundal, iar UI-ul intreaba de stare.
+function DbExportPanel() {
+  const [status, setStatus] = useState(null);
+  const [list, setList] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  function refresh() {
+    api('/db-export/status').then(setStatus).catch(function(){});
+    api('/db-export/list').then(setList).catch(function(){});
+  }
+  useEffect(function(){ refresh(); }, []);
+
+  // Cat timp ruleaza, verificam din 3 in 3 secunde.
+  useEffect(function(){
+    if (!status || !status.running) return;
+    var t = setTimeout(refresh, 3000);
+    return function(){ clearTimeout(t); };
+  }, [status]);
+
+  function start() {
+    mgConfirm({
+      title: 'Exporți baza de date?',
+      html: 'Fișierul conține <b>date reale</b>: emailuri, clienți, angajați, apeluri.<br><br>' +
+            'Ține-l pe disc criptat, fără sincronizare în cloud. Descărcarea se înregistrează în jurnalul de audit.',
+      confirmText: 'Da, pornește exportul',
+      icon: 'warning',
+    }).then(function(ok){
+      if (!ok) return;
+      setBusy(true);
+      api('/db-export/start', { method:'POST' })
+        .then(function(){ mgToast('success', 'Export pornit'); setBusy(false); refresh(); })
+        .catch(function(e){ setBusy(false); mgToast('error', (e && e.message) || 'Export eșuat'); });
+    });
+  }
+
+  // Descarcare prin fetch autorizat -> blob. Token-ul nu ajunge in URL.
+  function download(filename) {
+    setBusy(true);
+    var headers = {};
+    var t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    fetch(API + '/db-export/download/' + encodeURIComponent(filename), { headers })
+      .then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+      .then(function(b){
+        var u = URL.createObjectURL(b);
+        var a = document.createElement('a');
+        a.href = u; a.download = filename; document.body.appendChild(a); a.click();
+        document.body.removeChild(a);
+        setTimeout(function(){ URL.revokeObjectURL(u); }, 60000);
+        setBusy(false);
+      })
+      .catch(function(e){ setBusy(false); mgToast('error', 'Descărcare eșuată: ' + e.message); });
+  }
+
+  function fmtSize(b) {
+    if (!b && b !== 0) return '—';
+    return b > 1048576 ? (b/1048576).toFixed(0) + ' MB' : (b/1024).toFixed(0) + ' KB';
+  }
+
+  var running = status && status.running;
+
+  return h('div', { className:'card', style:{ padding:16, maxWidth:820 } }, [
+    h('h3', { key:'t', style:{ margin:'0 0 6px' } }, 'Export bază de date'),
+    h('p', { key:'d', style:{ margin:'0 0 4px', color:'var(--t2)', fontSize:13, lineHeight:1.5 } },
+      'Creează o copie completă a bazei, pentru dezvoltare locală. Importă-o cu:'),
+    h('code', { key:'cmd', style:{ display:'block', margin:'0 0 14px', padding:'8px 10px',
+        background:'var(--bg2)', border:'1px solid var(--bd)', borderRadius:6,
+        fontSize:12, fontFamily:'ui-monospace, monospace', overflowX:'auto' } },
+      'pg_restore -U mailguard -d mailguard -c fisier.dump'),
+
+    h('div', { key:'warn', style:{ margin:'0 0 14px', padding:'10px 12px',
+        background:'color-mix(in srgb, var(--yw) 12%, transparent)',
+        border:'1px solid color-mix(in srgb, var(--yw) 35%, transparent)',
+        borderRadius:6, fontSize:12.5, lineHeight:1.5, color:'var(--tx)' } },
+      'Conține date reale de client. Păstrează fișierul pe disc criptat și nu-l urca în Git sau în cloud. Fiecare descărcare se înregistrează în jurnalul de audit.'),
+
+    h('button', { key:'b', className:'btn', disabled: busy || running, onClick:start },
+      running ? 'Export în curs…' : 'Pornește export'),
+
+    running ? h('p', { key:'prog', style:{ margin:'10px 0 0', fontSize:13, color:'var(--t2)' } },
+      'Durează în jur de 30 de secunde. Pagina se actualizează singură.') : null,
+
+    (status && status.error) ? h('p', { key:'err', style:{ margin:'10px 0 0', fontSize:13,
+        color:'var(--rd)' } }, 'Eroare: ' + status.error) : null,
+
+    h('h4', { key:'lt', style:{ margin:'20px 0 8px', fontSize:14 } }, 'Disponibile'),
+    (!list || !list.exports || !list.exports.length)
+      ? h('p', { key:'empty', style:{ color:'var(--t3)', fontSize:13 } }, 'Niciun export încă.')
+      : h('table', { key:'tbl', className:'tbl', style:{ width:'100%' } }, [
+          h('thead', { key:'h' }, h('tr', null, [
+            h('th', { key:'a' }, 'Fișier'),
+            h('th', { key:'b', style:{ textAlign:'right' } }, 'Mărime'),
+            h('th', { key:'c' }, 'Creat'),
+            h('th', { key:'d' }, '')
+          ])),
+          h('tbody', { key:'b' }, list.exports.map(function(x){
+            return h('tr', { key:x.filename }, [
+              h('td', { key:'a', style:{ fontFamily:'ui-monospace, monospace', fontSize:12 } }, x.filename),
+              h('td', { key:'b', style:{ textAlign:'right', fontVariantNumeric:'tabular-nums',
+                  fontFamily:'ui-monospace, monospace', fontSize:12 } }, fmtSize(x.size_bytes)),
+              h('td', { key:'c', style:{ fontSize:12, color:'var(--t2)' } },
+                new Date(x.created_at).toLocaleString('ro-RO')),
+              h('td', { key:'d' }, h('button', { className:'btn secondary', disabled:busy,
+                onClick:function(){ download(x.filename); } }, 'Descarcă'))
+            ]);
+          }))
+        ]),
+    list ? h('p', { key:'ret', style:{ margin:'8px 0 0', fontSize:12, color:'var(--t3)' } },
+      'Se păstrează ultimele ' + list.retention + ' exporturi.') : null
+  ]);
+}
+
+function Settings({ user }) {
   const [sub, setSub] = useState('rules');
   const SUBS = [ { k:'rules', l:'Reguli' }, { k:'security', l:'Securitate' }, { k:'cts', l:'Conexiune API' }, { k:'backups', l:'Backup-uri' }, { k:'noreply', l:'Mail-uri no-reply' } ];
+  // Exportul bazei contine date reale de client — doar developer.
+  if (user && user.access_role === 'developer') SUBS.push({ k:'db-export', l:'Export bază' });
   return h('div', null, [
     h('div', { key:'tabs', className:'modal-tabs', style:{ borderBottom:'1px solid var(--bd)', marginBottom:16 } },
       SUBS.map(function(s){ return h('button', { key:s.k, className:'tab' + (sub===s.k?' active':''), onClick:function(){ setSub(s.k); } }, s.l); })),
@@ -8289,6 +8404,7 @@ function Settings() {
       sub==='security' ? h(SecurityPoliciesPanel, { key:'sec' }) :
       sub==='backups' ? h(BackupsPanel, { key:'b' }) :
       sub==='noreply' ? h(NoreplyPanel, { key:'noreply' }) :
+      sub==='db-export' ? h(DbExportPanel, { key:'dbx' }) :
       h('div', { style: { display:'grid', gridTemplateColumns:'1fr 1fr', gap:14, alignItems:'start' } }, [
         h(RulesPanel, { key:'r' }),
         h(SpamRulesPanel, { key:'s' })
@@ -14435,7 +14551,7 @@ function App() {
     setTab(origin || 'clients');
   }
   var clientsKey = 'clients' + (clientsDeepNav ? '-' + clientsDeepNav.ts : '');
-  const tabComp = { dashboard: h(Dashboard, { user }), emails: h(EmailsPage, { setTopbarRight }), documents: h(Documents, { setTopbarRight }), clients: h(Clients, { key: clientsKey, setTopbarRight, initialDeepNav: clientsDeepNav, onBack: backFromClient }), 'ai-analiza': h(AnalizaAI), 'cts-training': h(CtsTrainingPanel), reports: h(Reports), 'reports-stats': h(ReportsStatsShell, { setTopbarRight }), productivity: h(Productivity, { user, setTopbarRight }), satisfactie: h(SatisfactieDashboard, { onNavigateClient: navigateToClient }), settings: h(Settings), taskuri: h(TaskuriPage), 'device-ops': h(DeviceOpsPage), apeluri: h(ApelPage, { setTopbarRight }), 'cts-calls-training': h(CtsCallsTrainingPanel), 'calls-analitice': h(CallsAnalitice, { setTopbarRight }), utilizatori: h(UtilizatoriPage, { user }), 'prompturi-ai': h(PrompturiAIPage), 'personal-mailboxes': h(PersonalMailboxesPage, { setTopbarRight }), 'feedback-config': h(FeedbackConfigPage), 'feedback-campaigns': h(FeedbackCampaignsPage), 'feedback-dashboard': h(FeedbackDashboardPage), 'surse-date': h(SurseDatePage) }[tab];
+  const tabComp = { dashboard: h(Dashboard, { user }), emails: h(EmailsPage, { setTopbarRight }), documents: h(Documents, { setTopbarRight }), clients: h(Clients, { key: clientsKey, setTopbarRight, initialDeepNav: clientsDeepNav, onBack: backFromClient }), 'ai-analiza': h(AnalizaAI), 'cts-training': h(CtsTrainingPanel), reports: h(Reports), 'reports-stats': h(ReportsStatsShell, { setTopbarRight }), productivity: h(Productivity, { user, setTopbarRight }), satisfactie: h(SatisfactieDashboard, { onNavigateClient: navigateToClient }), settings: h(Settings, { user }), taskuri: h(TaskuriPage), 'device-ops': h(DeviceOpsPage), apeluri: h(ApelPage, { setTopbarRight }), 'cts-calls-training': h(CtsCallsTrainingPanel), 'calls-analitice': h(CallsAnalitice, { setTopbarRight }), utilizatori: h(UtilizatoriPage, { user }), 'prompturi-ai': h(PrompturiAIPage), 'personal-mailboxes': h(PersonalMailboxesPage, { setTopbarRight }), 'feedback-config': h(FeedbackConfigPage), 'feedback-campaigns': h(FeedbackCampaignsPage), 'feedback-dashboard': h(FeedbackDashboardPage), 'surse-date': h(SurseDatePage) }[tab];
   const tabTitle = (TABS.find(t => t.key === tab) || {}).label || tab;
 
   return h('div', { className: 'app' }, [

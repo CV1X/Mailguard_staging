@@ -8,6 +8,43 @@
      Istoricul pre-release (v0.x) păstrat mai jos pentru referință.
 -->
 
+## v2.8.0 - 2026-08-13
+
+### Export bază de date pentru dezvoltare locală (zona Setări)
+
+Buton nou în Setări → „Export bază", care generează o copie completă a bazei
+(`pg_dump -Fc`, ~196 MB, 108 tabele) descărcabilă pentru lucru local. Se
+importă cu `pg_restore -U mailguard -d mailguard -c fisier.dump`.
+
+**Acces: doar rolul `developer`.** Dublă pază — la nivel de router (`main.py`)
+și pe fiecare endpoint (`require_role(ROLE_DEVELOPER)`). Un admin (Bianca,
+Robert, Vlad, Calin) primește 403. Motiv: dump-ul conține date reale de client
+(emailuri, clienți, angajați, apeluri) — nu e o funcție de comoditate.
+
+**Asincron:** exportul rulează în fundal (un thread), interfața interoghează
+starea din 3 în 3 secunde. La ~196 MB, un request sincron ar depăși timeout-ul
+gunicorn (60s) și ar bloca un worker.
+
+**Audit:** fiecare pornire (`db_export_start`) și fiecare descărcare
+(`db_export_download`) se scriu în `audit_log` cu actor, IP și mărime.
+Descărcarea se auditează separat de pornire — un export poate fi descărcat de
+mai multe ori.
+
+**Endpoints:** `POST /db-export/start`, `GET /db-export/status`,
+`GET /db-export/list`, `GET /db-export/download/{filename}`. Retenție: ultimele
+3 arhive (fiecare ~196 MB). Scriere în `.part` + rename la final — o descărcare
+concurentă nu poate prinde un fișier incomplet.
+
+**Fișierul se salvează în** `storage/db-exports/`, exclus din Git (`.gitignore`
+acoperă `*.dump` și `storage/`).
+
+**Respins deliberat: buton de download `.env`.** Un secret descărcabil printr-un
+clic încetează să fie secret — orice sesiune uitată deschisă sau bug de
+autorizare ar expune `IRIS_SSO_SECRET` (cu care se emit token-uri pentru orice
+utilizator), `MS_CLIENT_SECRET` și `PERSONAL_MAILBOX_KEY`, ocolind exact
+restricția de roluri construită în v2.5.0–v2.6.1. Alternativă: `.env.example`
+în repo + valorile reale prin `scp`/Passbolt.
+
 ## v2.7.0 - 2026-08-12
 
 ### Integrare Git + deploy prin pull
