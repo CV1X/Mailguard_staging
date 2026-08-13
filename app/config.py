@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     jwt_expires_minutes: int = 60 * 24  # 1 day
+    # Skip IRIS SSO pe laptop — doar cu LOCAL_AUTH_BYPASS=true in .env local
+    local_auth_bypass: bool = False
+    local_auth_email: str = ""
 
     # Microsoft Graph (loaded later from settings table or .env)
     ms_tenant_id: str = ""

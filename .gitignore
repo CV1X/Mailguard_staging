@@ -51,6 +51,7 @@ uploads/
 venv/
 env/
 .venv/
+.pgdata/
 node_modules/
 __pycache__/
 *.py[cod]

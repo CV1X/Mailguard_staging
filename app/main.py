@@ -108,8 +108,8 @@ app.include_router(noreply_api.router, tags=["noreply"])
 app.include_router(graph_messages.router, tags=["graph"])
 
 
-# Serve UI
-UI_DIR = Path("/opt/iris-mailguard/app/ui")
+# Serve UI (relativ la pachet — merge local si pe server /opt/iris-mailguard)
+UI_DIR = Path(__file__).resolve().parent / "ui"
 
 _GZIP_FILES = {"mg-app.js"}
 

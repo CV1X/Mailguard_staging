@@ -2241,11 +2241,16 @@ function EmailDetail(props) {
 
 }
 
-// Login (NOVA SSO)
+// Login (NOVA SSO) — pe local: buton bypass daca /auth/local-dev e enabled
 function Login({ onLogin }) {
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [localDev, setLocalDev] = useState(false);
   useEffect(() => {
+    fetch(API + '/auth/local-dev')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d && d.enabled) setLocalDev(true); })
+      .catch(function(){});
     const params = new URLSearchParams(window.location.search);
     const t = params.get('t');
     if (t) {
@@ -2265,13 +2270,33 @@ function Login({ onLogin }) {
       .catch(e => { setErr(String(e.message || e)); setBusy(false); });
     }
   }, []);
+  function doLocalLogin() {
+    setBusy(true); setErr('');
+    fetch(API + '/auth/local-dev', { method: 'POST' })
+      .then(r => r.json().then(d => ({ ok: r.ok, d })))
+      .then(({ ok, d }) => {
+        if (!ok) throw new Error(d.detail || 'Local login failed');
+        setToken(d.access_token);
+        onLogin(d.user);
+      })
+      .catch(e => { setErr(String(e.message || e)); setBusy(false); });
+  }
   return h('div', { className: 'card login-box' }, [
     h('h1', { key: 1 }, 'Cargo360'),
-    h('div', { key: 2, className: 'sub' }, 'NOVA-secured SSO · v0.10.0'),
+    h('div', { key: 2, className: 'sub' }, localDev ? 'Local dev · SSO bypass' : 'NOVA-secured SSO · v0.10.0'),
     h('div', { key: 3, style: { padding: 20, background: 'rgba(79,195,255,0.08)', border: '1px solid var(--am)', borderRadius: 8, marginTop: 14, fontSize: 13, lineHeight: 1.6, color: 'var(--t2)' } }, [
-      h('div', { key: 1, style: { color: 'var(--am)', fontWeight: 600, marginBottom: 8 } }, busy ? 'Se autentifica prin NOVA...' : 'Acces doar prin IRIS'),
-      h('div', { key: 2 }, busy ? 'Se verifica token-ul IRIS si se initializeaza sesiunea...' : 'Pentru a accesa Cargo360, deschide IRIS Admin si click pe „Deschide Admin UI".'),
-      err ? h('div', { key: 3, style: { marginTop: 12, padding: 10, background: 'rgba(239,68,68,0.10)', border: '1px solid var(--rd)', borderRadius: 6, color: 'var(--rd)', fontSize: 12 } }, 'Eroare SSO: ' + err) : null,
+      h('div', { key: 1, style: { color: 'var(--am)', fontWeight: 600, marginBottom: 8 } }, busy ? 'Se autentifica...' : (localDev ? 'Mediu local' : 'Acces doar prin IRIS')),
+      h('div', { key: 2 }, busy ? 'Se initializeaza sesiunea...' : (localDev
+        ? 'SSO IRIS e ocolit pe acest mediu. Apasa butonul ca sa intri cu contul local de developer.'
+        : 'Pentru a accesa Cargo360, deschide IRIS Admin si click pe „Deschide Admin UI".')),
+      err ? h('div', { key: 3, style: { marginTop: 12, padding: 10, background: 'rgba(239,68,68,0.10)', border: '1px solid var(--rd)', borderRadius: 6, color: 'var(--rd)', fontSize: 12 } }, 'Eroare: ' + err) : null,
+      localDev ? h('button', {
+        key: 'local',
+        className: 'btn',
+        disabled: busy,
+        onClick: doLocalLogin,
+        style: { marginTop: 16, width: '100%', cursor: busy ? 'wait' : 'pointer' }
+      }, busy ? 'Se autentifica...' : 'Intră local (dev)') : null,
       h('div', { key: 4, style: { marginTop: 16, fontSize: 11, color: 'var(--t3)' } },
         h('a', { href: 'https://iris.nordlogistics.eu/', style: { color: 'var(--am)' } }, '→ Deschide IRIS')
       )

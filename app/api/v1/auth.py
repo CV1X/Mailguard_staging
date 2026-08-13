@@ -1,8 +1,15 @@
 """v0.10.0 — Auth: admin login + JWT verification."""
+import os
+import hmac
+import hashlib
+import base64
+import json
+import time
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from typing import Optional
 from jose import jwt, JWTError
 import bcrypt
@@ -52,6 +59,74 @@ def get_current_admin(authorization: Optional[str] = Header(None), db: Session =
     if not row or not row._mapping["is_active"]:
         raise HTTPException(401, "User inactive or not found")
     return dict(row._mapping)
+
+
+def _local_auth_enabled() -> bool:
+    """Bypass SSO doar pe laptop. Explicit LOCAL_AUTH_BYPASS=true — NU pe staging/prod
+    (acolo APP_ENV e tot 'staging', deci nu ne bazam pe el)."""
+    return bool(get_settings().local_auth_bypass)
+
+
+def _login_response_for_user(user: dict) -> LoginResponse:
+    from app.services import access_control as ac
+    _ar = ac.normalize_role(user.get("access_role"))
+    return LoginResponse(
+        access_token=create_token(user["id"], user["email"], user["role"]),
+        user={
+            "id": user["id"],
+            "username": user["username"],
+            "email": user["email"],
+            "role": user["role"],
+            "access_role": _ar,
+            "allowed_modules": ac.allowed_modules(_ar),
+            "allowed_subtabs": ac.allowed_subtabs(_ar),
+            "landing_module": ac.landing_module(_ar),
+            "can_manage_roles": _ar in (ac.ROLE_ADMIN, ac.ROLE_DEVELOPER),
+        },
+    )
+
+
+@router.get("/auth/local-dev")
+def local_dev_status():
+    """UI-ul întreabă dacă poate afișa butonul „Intră local"."""
+    return {"enabled": _local_auth_enabled()}
+
+
+@router.post("/auth/local-dev", response_model=LoginResponse)
+def local_dev_login(db: Session = Depends(get_db)):
+    """Login fără IRIS — doar când LOCAL_AUTH_BYPASS=true în .env local."""
+    if not _local_auth_enabled():
+        raise HTTPException(404, "Local auth bypass disabled")
+
+    email = (get_settings().local_auth_email or "").strip().lower()
+    row = None
+    if email:
+        row = db.execute(
+            text("SELECT id, username, email, role, access_role, is_active FROM admin_users WHERE lower(email)=:em"),
+            {"em": email},
+        ).fetchone()
+    if not row:
+        # fallback: primul developer activ din dump
+        row = db.execute(text("""
+            SELECT id, username, email, role, access_role, is_active
+            FROM admin_users
+            WHERE is_active = true AND lower(coalesce(access_role,'')) = 'developer'
+            ORDER BY id LIMIT 1
+        """)).fetchone()
+    if not row:
+        raise HTTPException(500, "Niciun admin_users activ pentru local login")
+
+    user = dict(row._mapping)
+    if not user["is_active"]:
+        raise HTTPException(403, "User inactive")
+
+    db.execute(text("UPDATE admin_users SET last_login_at=NOW() WHERE id=:id"), {"id": user["id"]})
+    db.execute(text("""
+        INSERT INTO audit_log(actor, action, entity_type, entity_id, details)
+        VALUES(:a, 'local_dev_login', 'admin_user', :id, '{"via":"local_auth_bypass"}'::jsonb)
+    """), {"a": user["username"], "id": user["id"]})
+    db.commit()
+    return _login_response_for_user(user)
 
 
 @router.post("/auth/login", response_model=LoginResponse)
@@ -105,9 +180,6 @@ def me(user=Depends(get_current_admin)):
 # v10.18.39 — IRIS SSO endpoint (Razvan 2026-05-20)
 # Login only via signed token from IRIS Gateway. No password.
 # =====================================================
-import os, hmac, hashlib, base64, json, time
-from sqlalchemy.exc import IntegrityError
-
 IRIS_SSO_SECRET_RAW = os.getenv("IRIS_SSO_SECRET", "").strip()
 
 
