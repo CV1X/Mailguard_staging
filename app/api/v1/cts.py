@@ -440,6 +440,50 @@ _CTS_PDF_ONLY_CATEGORIES = ("vehicul", "contract")
 # gunicorn-ului si TOT lotul se pierde; 5.000 lasa marja larga (masurat: 300 = 0.4 s).
 CTS_MAX_BATCH = 5000
 
+# Ordinea de livrare în get_email_documents (CTS procesează în ordinea array-ului):
+#   0) Talon (dacă există) — mereu primul, indiferent de restul
+#   1) sofer
+#   2) contract
+#   3) vehicul (non-talon)
+#   4) rest (fără categorie)
+# Tipuri Talon din document_types (RO + MD).
+_CTS_TALON_TYPE_IDS = frozenset({1, 7})
+_CTS_CATEGORY_ORDER = {"sofer": 1, "contract": 2, "vehicul": 3}
+
+
+def _cts_is_talon(doc: dict) -> bool:
+    tid = doc.get("document_type_id")
+    if tid is not None and int(tid) in _CTS_TALON_TYPE_IDS:
+        return True
+    blob = " ".join(
+        str(doc.get(k) or "") for k in ("document_type", "part_label", "attachment_name")
+    ).lower()
+    return "talon" in blob
+
+
+def _cts_doc_sort_key(doc: dict):
+    """Cheie: Talon absolut primul, apoi sofer → contract → vehicul."""
+    if _cts_is_talon(doc):
+        return (0, 0, int(doc.get("attachment_id") or 0), int(doc.get("extraction_id") or 0))
+    cat = (doc.get("category") or "").strip().lower()
+    return (
+        _CTS_CATEGORY_ORDER.get(cat, 9),
+        1,
+        int(doc.get("attachment_id") or 0),
+        int(doc.get("extraction_id") or 0),
+    )
+
+
+def _sort_docs_for_cts(docs: list) -> list:
+    """Ordonează documentele pentru feed-ul CTS.
+
+    - Mail mixte: Talon (dacă e) → sofer → contract → vehicul.
+    - Mail un singur tip: tot Talonul primul, dacă există în lot.
+    """
+    if len(docs) <= 1:
+        return docs
+    return sorted(docs, key=_cts_doc_sort_key)
+
 
 def _normalize_for_cts(data: bytes, mime: str, category, att_id=None):
     """Aduce fisierul la formatul cerut de CTS: (bytes, mime).
@@ -768,7 +812,8 @@ def cts_get_email_documents(request: Request,
             "content_type": m.get("content_type"),
             "is_part": is_part,
             "part_label": m.get("part_label"),
-            "category": m.get("category"),
+            # type_category (din document_types) e mai stabilă decât category pe extracție
+            "category": m.get("type_category") or m.get("category"),
             "document_type_id": m.get("document_type_id"),
             "document_type": m.get("detected_type"),
             "confidence": (float(conf) if conf is not None else None),
@@ -834,6 +879,8 @@ def cts_get_email_documents(request: Request,
 
     def _iso(v):
         return v.isoformat() if (v is not None and hasattr(v, "isoformat")) else v
+
+    docs = _sort_docs_for_cts(docs)
 
     summary = "doc-feed email %s: status=%s docs=%d validate=%d" % (id_email, agg, n, n_validated)
     _log(db, "get_email_documents", [id_email], requested=1, success=1, total=n,

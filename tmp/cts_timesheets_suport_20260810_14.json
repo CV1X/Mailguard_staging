@@ -1,0 +1,344 @@
+{
+  "request": {
+    "path": "/cts/timesheets",
+    "start": "2026-08-10",
+    "end": "2026-08-14"
+  },
+  "count": 90,
+  "start": "2026-08-10",
+  "end": "2026-08-14",
+  "items_suport_1": [
+    {
+      "date": "2026-08-10",
+      "department_id": 1,
+      "department": "Suport 1",
+      "department_slug": "suport-1",
+      "present": true,
+      "employee_count": 6,
+      "employees": [
+        {
+          "employee_id": 145,
+          "full_name": "Breahna Andrei",
+          "begin": "2026-08-10T05:00:00",
+          "end": "2026-08-10T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 110,
+          "full_name": "Buda Alina-Mioara",
+          "begin": "2026-08-10T05:00:00",
+          "end": "2026-08-10T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 157,
+          "full_name": "Bulmau Anamaria-Iuliana",
+          "begin": "2026-08-10T05:00:00",
+          "end": "2026-08-10T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 123,
+          "full_name": "Judea Bianca-Denisa",
+          "begin": "2026-08-10T05:00:00",
+          "end": "2026-08-10T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 100,
+          "full_name": "Negrescu Elena",
+          "begin": "2026-08-10T05:00:00",
+          "end": "2026-08-10T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 135,
+          "full_name": "Olar Andrei-Bogdan",
+          "begin": "2026-08-10T05:00:00",
+          "end": "2026-08-10T13:30:00",
+          "minutes": 510
+        }
+      ]
+    },
+    {
+      "date": "2026-08-11",
+      "department_id": 1,
+      "department": "Suport 1",
+      "department_slug": "suport-1",
+      "present": true,
+      "employee_count": 6,
+      "employees": [
+        {
+          "employee_id": 145,
+          "full_name": "Breahna Andrei",
+          "begin": "2026-08-11T05:00:00",
+          "end": "2026-08-11T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 110,
+          "full_name": "Buda Alina-Mioara",
+          "begin": "2026-08-11T05:00:00",
+          "end": "2026-08-11T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 157,
+          "full_name": "Bulmau Anamaria-Iuliana",
+          "begin": "2026-08-11T05:00:00",
+          "end": "2026-08-11T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 123,
+          "full_name": "Judea Bianca-Denisa",
+          "begin": "2026-08-11T05:00:00",
+          "end": "2026-08-11T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 100,
+          "full_name": "Negrescu Elena",
+          "begin": "2026-08-11T05:00:00",
+          "end": "2026-08-11T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 135,
+          "full_name": "Olar Andrei-Bogdan",
+          "begin": "2026-08-11T05:00:00",
+          "end": "2026-08-11T13:30:00",
+          "minutes": 510
+        }
+      ]
+    },
+    {
+      "date": "2026-08-12",
+      "department_id": 1,
+      "department": "Suport 1",
+      "department_slug": "suport-1",
+      "present": true,
+      "employee_count": 6,
+      "employees": [
+        {
+          "employee_id": 145,
+          "full_name": "Breahna Andrei",
+          "begin": "2026-08-12T05:00:00",
+          "end": "2026-08-12T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 110,
+          "full_name": "Buda Alina-Mioara",
+          "begin": "2026-08-12T05:00:00",
+          "end": "2026-08-12T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 157,
+          "full_name": "Bulmau Anamaria-Iuliana",
+          "begin": "2026-08-12T05:00:00",
+          "end": "2026-08-12T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 123,
+          "full_name": "Judea Bianca-Denisa",
+          "begin": "2026-08-12T05:00:00",
+          "end": "2026-08-12T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 100,
+          "full_name": "Negrescu Elena",
+          "begin": "2026-08-12T05:00:00",
+          "end": "2026-08-12T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 135,
+          "full_name": "Olar Andrei-Bogdan",
+          "begin": "2026-08-12T05:00:00",
+          "end": "2026-08-12T13:30:00",
+          "minutes": 510
+        }
+      ]
+    },
+    {
+      "date": "2026-08-13",
+      "department_id": 1,
+      "department": "Suport 1",
+      "department_slug": "suport-1",
+      "present": true,
+      "employee_count": 6,
+      "employees": [
+        {
+          "employee_id": 145,
+          "full_name": "Breahna Andrei",
+          "begin": "2026-08-13T05:00:00",
+          "end": "2026-08-13T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 110,
+          "full_name": "Buda Alina-Mioara",
+          "begin": "2026-08-13T05:00:00",
+          "end": "2026-08-13T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 157,
+          "full_name": "Bulmau Anamaria-Iuliana",
+          "begin": "2026-08-13T05:00:00",
+          "end": "2026-08-13T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 123,
+          "full_name": "Judea Bianca-Denisa",
+          "begin": "2026-08-13T05:00:00",
+          "end": "2026-08-13T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 100,
+          "full_name": "Negrescu Elena",
+          "begin": "2026-08-13T05:00:00",
+          "end": "2026-08-13T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 135,
+          "full_name": "Olar Andrei-Bogdan",
+          "begin": "2026-08-13T05:00:00",
+          "end": "2026-08-13T13:30:00",
+          "minutes": 510
+        }
+      ]
+    },
+    {
+      "date": "2026-08-14",
+      "department_id": 1,
+      "department": "Suport 1",
+      "department_slug": "suport-1",
+      "present": true,
+      "employee_count": 6,
+      "employees": [
+        {
+          "employee_id": 145,
+          "full_name": "Breahna Andrei",
+          "begin": "2026-08-14T05:00:00",
+          "end": "2026-08-14T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 110,
+          "full_name": "Buda Alina-Mioara",
+          "begin": "2026-08-14T05:00:00",
+          "end": "2026-08-14T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 157,
+          "full_name": "Bulmau Anamaria-Iuliana",
+          "begin": "2026-08-14T05:00:00",
+          "end": "2026-08-14T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 123,
+          "full_name": "Judea Bianca-Denisa",
+          "begin": "2026-08-14T05:00:00",
+          "end": "2026-08-14T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 100,
+          "full_name": "Negrescu Elena",
+          "begin": "2026-08-14T05:00:00",
+          "end": "2026-08-14T13:30:00",
+          "minutes": 510
+        },
+        {
+          "employee_id": 135,
+          "full_name": "Olar Andrei-Bogdan",
+          "begin": "2026-08-14T05:00:00",
+          "end": "2026-08-14T13:30:00",
+          "minutes": 510
+        }
+      ]
+    }
+  ],
+  "items_suport_2_cuc_only": [
+    {
+      "date": "2026-08-10",
+      "department": "Suport 2",
+      "department_slug": "suport-2",
+      "employees": [
+        {
+          "employee_id": 125,
+          "full_name": "Cuc Mihai",
+          "begin": "2026-08-10T05:00:00",
+          "end": "2026-08-10T13:30:00",
+          "minutes": 510
+        }
+      ]
+    },
+    {
+      "date": "2026-08-11",
+      "department": "Suport 2",
+      "department_slug": "suport-2",
+      "employees": [
+        {
+          "employee_id": 125,
+          "full_name": "Cuc Mihai",
+          "begin": "2026-08-11T05:00:00",
+          "end": "2026-08-11T13:30:00",
+          "minutes": 510
+        }
+      ]
+    },
+    {
+      "date": "2026-08-12",
+      "department": "Suport 2",
+      "department_slug": "suport-2",
+      "employees": [
+        {
+          "employee_id": 125,
+          "full_name": "Cuc Mihai",
+          "begin": "2026-08-12T05:00:00",
+          "end": "2026-08-12T13:30:00",
+          "minutes": 510
+        }
+      ]
+    },
+    {
+      "date": "2026-08-13",
+      "department": "Suport 2",
+      "department_slug": "suport-2",
+      "employees": [
+        {
+          "employee_id": 125,
+          "full_name": "Cuc Mihai",
+          "begin": "2026-08-13T05:00:00",
+          "end": "2026-08-13T13:30:00",
+          "minutes": 510
+        }
+      ]
+    },
+    {
+      "date": "2026-08-14",
+      "department": "Suport 2",
+      "department_slug": "suport-2",
+      "employees": [
+        {
+          "employee_id": 125,
+          "full_name": "Cuc Mihai",
+          "begin": "2026-08-14T05:00:00",
+          "end": "2026-08-14T13:30:00",
+          "minutes": 510
+        }
+      ]
+    }
+  ]
+}
