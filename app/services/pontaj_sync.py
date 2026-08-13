@@ -161,7 +161,15 @@ def sync_attendance(db: Session, *, dry_run: bool = False, payload: Optional[Lis
         dmap = {}
 
     n_upsert = n_skip_dept = n_skip_date = 0
+    n_emp_skipped_manual = 0
     seen_emp: Dict[Any, Any] = {}  # (dept, work_date) -> (employees_list, dept_present)
+
+    # Pontaje corectate manual: nu se suprascriu (nici prezență CTS, nici absență implicită).
+    prot_rows = db.execute(text(
+        "SELECT employee_id, work_date FROM employee_attendance "
+        "WHERE manual_override = true AND employee_id IS NOT NULL"
+    )).fetchall()
+    protected = {(int(r._mapping["employee_id"]), str(r._mapping["work_date"])[:10]) for r in prot_rows}
     for rec in records:
         if not isinstance(rec, dict):
             continue
@@ -268,6 +276,9 @@ def sync_attendance(db: Session, *, dry_run: bool = False, payload: Optional[Lis
                     })
 
             for cts_id, acc in emp_day_acc.items():
+                if acc["eid"] and (acc["eid"], work_date) in protected:
+                    n_emp_skipped_manual += 1
+                    continue
                 ivs = json.dumps(acc["intervals"]) if len(acc["intervals"]) > 1 else None
                 db.execute(text(
                     "INSERT INTO employee_attendance"
@@ -279,6 +290,7 @@ def sync_attendance(db: Session, *, dry_run: bool = False, payload: Optional[Lis
                     " department=EXCLUDED.department, present=EXCLUDED.present,"
                     " begin_time=EXCLUDED.begin_time, end_time=EXCLUDED.end_time,"
                     " minutes=EXCLUDED.minutes, intervals=EXCLUDED.intervals, synced_at=now()"
+                    " WHERE employee_attendance.manual_override IS NOT TRUE"
                 ), {"cid": cts_id, "eid": acc["eid"], "fn": acc["fn"], "dept": dept,
                     "wd": work_date, "bt": acc["begin"], "et": acc["end"],
                     "mins": acc["mins"] or None, "ivs": ivs})
@@ -287,6 +299,9 @@ def sync_attendance(db: Session, *, dry_run: bool = False, payload: Optional[Lis
             # Absent implicite: angajati enabled din dept care nu au aparut in employees[]
             for name_norm, (emp_id, full_name) in dept_cache.items():
                 if name_norm not in seen_names:
+                    if emp_id and (emp_id, work_date) in protected:
+                        n_emp_skipped_manual += 1
+                        continue
                     cts_id = f"absent_{emp_id}_{work_date}"
                     db.execute(text(
                         "INSERT INTO employee_attendance"
@@ -295,6 +310,7 @@ def sync_attendance(db: Session, *, dry_run: bool = False, payload: Optional[Lis
                         " VALUES (:cid,:eid,:fn,:dept,:wd,false,'cts_pontaj',now())"
                         " ON CONFLICT (cts_employee_id, work_date) DO UPDATE SET"
                         " present=EXCLUDED.present, synced_at=now()"
+                        " WHERE employee_attendance.manual_override IS NOT TRUE"
                     ), {"cid": cts_id, "eid": emp_id, "fn": full_name,
                         "dept": dept, "wd": work_date})
                     n_emp_absence += 1
@@ -302,6 +318,7 @@ def sync_attendance(db: Session, *, dry_run: bool = False, payload: Optional[Lis
     summary = {"ok": True, "received": len(records), "upserted": n_upsert,
                "skipped_dept": n_skip_dept, "skipped_date": n_skip_date,
                "emp_upserted": n_emp_upsert, "emp_absences": n_emp_absence,
+               "emp_skipped_manual": n_emp_skipped_manual,
                "date_from": date_from, "date_to": date_to}
     db.execute(text("UPDATE settings SET value=to_jsonb(now()) WHERE key='pontaj_sync.last_sync_at'"))
     _set_setting(db, "pontaj_sync.last_result", summary)

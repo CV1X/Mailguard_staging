@@ -23,11 +23,11 @@ from app.services import satisfaction_engine
 
 logger = logging.getLogger("mailguard.satisfaction_snapshot")
 
-BATCH_SIZE = 5  # flush des — UI vede progresul pe rulări selective / preview
+BATCH_SIZE = 1  # flush imediat — UI vede fiecare client după IRIS
 
 # Rate-limit apeluri IRIS AI: pauză între clienți ca să nu bombardăm gateway-ul
 # (fiecare client cu activitate face 1 apel IRIS in compute_satisfaction_v4 / traiectorie V4).
-AI_CALL_SPACING_SECONDS = 1.0
+AI_CALL_SPACING_SECONDS = 0.3
 
 
 def _month_interval(month_key: str):

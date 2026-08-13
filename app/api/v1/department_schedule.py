@@ -22,6 +22,21 @@ router = APIRouter()
 
 _TIME_RE = __import__("re").compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
+# employee_attendance.begin_time/end_time sunt UTC naive. Afișarea și editarea
+# din UI folosesc ora României — același +3h ca GET monthly-attendance.
+_LOCAL_UTC_OFFSET = _dt.timedelta(hours=3)
+
+
+def _utc_to_local_hm(ts) -> Optional[str]:
+    if not ts:
+        return None
+    return (ts + _LOCAL_UTC_OFFSET).strftime("%H:%M")
+
+
+def _local_hm_to_utc(work_date: _dt.date, hm: str) -> _dt.datetime:
+    hh, mm = map(int, hm.split(":"))
+    return _dt.datetime.combine(work_date, _dt.time(hh, mm)) - _LOCAL_UTC_OFFSET
+
 
 def _empty_week(department: str) -> list:
     return [{"weekday": wd, "start_time": None, "end_time": None,
@@ -112,7 +127,9 @@ def monthly_attendance(
     # Date prezenta din employee_attendance (cu ore pontaj)
     att_rows = db.execute(text(
         "SELECT employee_id, full_name, department, work_date, present, "
-        "  begin_time, end_time, minutes, intervals "
+        "  begin_time, end_time, minutes, intervals, "
+        "  COALESCE(manual_override, false) AS manual_override, "
+        "  manual_override_by, source "
         "FROM employee_attendance "
         "WHERE department = ANY(:depts) "
         "  AND work_date BETWEEN :start AND :end "
@@ -129,10 +146,13 @@ def monthly_attendance(
         if m["employee_id"] is not None:
             att_index[key][int(m["employee_id"])] = {
                 "present": bool(m["present"]),
-                "begin": (m["begin_time"] + _dt.timedelta(hours=3)).strftime("%H:%M") if m["begin_time"] else None,
-                "end": (m["end_time"] + _dt.timedelta(hours=3)).strftime("%H:%M") if m["end_time"] else None,
+                "begin": _utc_to_local_hm(m["begin_time"]),
+                "end": _utc_to_local_hm(m["end_time"]),
                 "minutes": int(m["minutes"]) if m["minutes"] else None,
                 "intervals": m["intervals"] if m["intervals"] else None,
+                "manual_override": bool(m["manual_override"]),
+                "manual_override_by": m["manual_override_by"],
+                "source": m["source"],
             }
 
     # Construim raspunsul per departament
@@ -198,6 +218,109 @@ def monthly_attendance(
     if department:
         return result.get(department, {})
     return result
+
+
+@router.put("/department-schedule/attendance")
+def put_employee_attendance(body: dict, db: Session = Depends(get_db),
+                            admin=Depends(get_current_admin)):
+    """Corectare manuală a unui pontaj (angajat + zi). Marchează rândul ca
+    manual_override — pontaj_sync nu-l mai suprascrie.
+
+    Body: employee_id, work_date (YYYY-MM-DD), present (bool), begin/end (HH:MM
+    ora României). revert=true scoate protecția; următoarea sync ia din nou CTS.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Corp invalid")
+
+    try:
+        emp_id = int(body.get("employee_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "employee_id invalid")
+
+    raw_date = body.get("work_date")
+    try:
+        work_date = _dt.date.fromisoformat(str(raw_date)[:10])
+    except (TypeError, ValueError):
+        raise HTTPException(400, "work_date invalid, așteptat YYYY-MM-DD")
+
+    emp = db.execute(text(
+        "SELECT id, name, department FROM employee_department_mapping WHERE id=:id"
+    ), {"id": emp_id}).fetchone()
+    if not emp:
+        raise HTTPException(404, "Angajat necunoscut")
+    emp_m = emp._mapping
+    actor = (admin or {}).get("email") or (admin or {}).get("username") or "admin"
+
+    existing = db.execute(text(
+        "SELECT id, cts_employee_id FROM employee_attendance "
+        "WHERE employee_id=:eid AND work_date=:wd ORDER BY id"
+    ), {"eid": emp_id, "wd": work_date}).fetchall()
+
+    if body.get("revert"):
+        if not existing:
+            raise HTTPException(404, "Nu există pontaj de revenit pentru această zi")
+        db.execute(text(
+            "UPDATE employee_attendance SET manual_override=false, "
+            "manual_override_at=NULL, manual_override_by=NULL "
+            "WHERE employee_id=:eid AND work_date=:wd"
+        ), {"eid": emp_id, "wd": work_date})
+        db.execute(text(
+            "DELETE FROM employee_attendance "
+            "WHERE employee_id=:eid AND work_date=:wd "
+            "  AND cts_employee_id LIKE 'manual_%'"
+        ), {"eid": emp_id, "wd": work_date})
+        db.commit()
+        return {"ok": True, "reverted": True,
+                "employee_id": emp_id, "work_date": work_date.isoformat()}
+
+    present = bool(body.get("present", True))
+    begin_hm = body.get("begin")
+    end_hm = body.get("end")
+    begin_ts = end_ts = minutes = None
+    if present:
+        if not (isinstance(begin_hm, str) and _TIME_RE.match(begin_hm)):
+            raise HTTPException(400, "begin invalid (așteptat HH:MM)")
+        if not (isinstance(end_hm, str) and _TIME_RE.match(end_hm)):
+            raise HTTPException(400, "end invalid (așteptat HH:MM)")
+        begin_ts = _local_hm_to_utc(work_date, begin_hm)
+        end_ts = _local_hm_to_utc(work_date, end_hm)
+        if end_ts <= begin_ts:
+            end_ts += _dt.timedelta(days=1)
+        minutes = int((end_ts - begin_ts).total_seconds() // 60)
+
+    params = {
+        "eid": emp_id, "fn": str(emp_m["name"]), "dept": str(emp_m["department"]),
+        "wd": work_date, "p": present, "bt": begin_ts, "et": end_ts,
+        "mins": minutes, "by": actor,
+    }
+    if existing:
+        db.execute(text(
+            "UPDATE employee_attendance SET "
+            "present=:p, begin_time=:bt, end_time=:et, minutes=:mins, intervals=NULL, "
+            "source='manual', manual_override=true, manual_override_at=now(), "
+            "manual_override_by=:by, synced_at=now() "
+            "WHERE employee_id=:eid AND work_date=:wd"
+        ), params)
+    else:
+        db.execute(text(
+            "INSERT INTO employee_attendance "
+            "(cts_employee_id, employee_id, full_name, department, work_date, "
+            " present, begin_time, end_time, minutes, intervals, source, synced_at, "
+            " manual_override, manual_override_at, manual_override_by) "
+            "VALUES (:cid, :eid, :fn, :dept, :wd, :p, :bt, :et, :mins, NULL, "
+            "        'manual', now(), true, now(), :by)"
+        ), {**params, "cid": "manual_" + str(emp_id)})
+    db.commit()
+    return {
+        "ok": True,
+        "employee_id": emp_id,
+        "work_date": work_date.isoformat(),
+        "present": present,
+        "begin": begin_hm if present else None,
+        "end": end_hm if present else None,
+        "minutes": minutes,
+        "manual_override": True,
+    }
 
 
 @router.get("/department-schedule")

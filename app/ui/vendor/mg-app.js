@@ -3439,7 +3439,7 @@ function ClientSatV4({ satHistory, assetEmpty }) {
         h('div', { key: 's', style: { fontSize: 11, color: 'var(--t3)', marginTop: 2 } }, 'Singurul KPI · ' + (bd.total_interactions || 0) + ' interacțiuni analizate')
       ]),
       h('div', { key: 'rule', style: { marginBottom: 10, padding: '6px 10px', background: 'color-mix(in srgb, #06b6d4 8%, transparent)', borderRadius: 4, borderLeft: '3px solid #06b6d4', fontSize: 11, color: 'var(--t2)' } },
-        'Scorul este starea finală estimată de IRIS pe promptul V4. Fără pondere Emoție/Context și fără restituire matematică.'
+        'IRIS notează fiecare săptămână cu interacțiuni (1 apel/săptămână). Scorul lunii = medie ponderată pe interacțiuni — fără apel IRIS separat pe lună.'
       ),
       category ? h('div', { key: 'cat', style: { marginBottom: 6, fontSize: 12 } }, [
         h('span', { key: 'l', style: { fontWeight: 700, color: 'var(--t3)' } }, 'Categorie: '),
@@ -3543,7 +3543,7 @@ function ClientSatV4({ satHistory, assetEmpty }) {
         ])
       ]),
       isTrajectory ? h('div', { key: 'formula', style: { fontSize: 12, color: 'var(--t2)', background: 'color-mix(in srgb, var(--am) 5%, transparent)', borderRadius: 4, padding: '8px 10px', lineHeight: 1.6 } },
-        'Satisfacția = starea finală din interpretarea IRIS. Nu se mai combină Emoție 70% + Context 30%.'
+        'Luna = medie ponderată a scorurilor IRIS pe săptămâni (după nr. interacțiuni). Fără apel IRIS separat pe lună.'
       ) : null
     ]);
   })();
@@ -7841,6 +7841,8 @@ function DepartmentSchedulePanel() {
   var [msg, setMsg] = useState(null);
   var [pontajStatus, setPontajStatus] = useState(null);
   var [pontajSyncing, setPontajSyncing] = useState(false);
+  var [editCell, setEditCell] = useState(null);
+  var [editBusy, setEditBusy] = useState(false);
 
   function getMonthStr(offset) {
     var d = new Date(today.getFullYear(), today.getMonth() + (offset !== undefined ? offset : monthOffset), 1);
@@ -7875,7 +7877,8 @@ function DepartmentSchedulePanel() {
         if (r && r.ok) {
           setMsg('Sincronizare reușită: ' + (r.upserted || 0) + ' zile dept, ' +
             (r.emp_upserted || 0) + ' prezenți, ' + (r.emp_absences || 0) + ' absenți din ' +
-            (r.received || 0) + ' primite.');
+            (r.received || 0) + ' primite' +
+            (r.emp_skipped_manual ? ('. ' + r.emp_skipped_manual + ' pontaje editate manual au fost păstrate.') : '.'));
         } else {
           setMsg('Sincronizare: ' + ((r && (r.skipped || r.error)) || 'necunoscut') + '.');
         }
@@ -7887,11 +7890,86 @@ function DepartmentSchedulePanel() {
   }
 
   var DOW_SHORT = ['L', 'M', 'M', 'J', 'V', 'S', 'D'];
+  var SCH1 = { begin: '08:00', end: '16:30' };
+  var SCH2 = { begin: '12:00', end: '20:30' };
 
   function cellIcon(val) {
     if (val === true) return '✓';
     if (val === false) return '–';
     return '·';
+  }
+
+  function openEdit(emp, d, raw) {
+    if (!emp || !emp.employee_id) return;
+    var pres = raw && typeof raw === 'object' ? raw.present : raw;
+    setEditCell({
+      employee_id: emp.employee_id,
+      name: emp.name,
+      date: d.date,
+      present: pres !== false,
+      begin: (raw && raw.begin) || SCH1.begin,
+      end: (raw && raw.end) || SCH1.end,
+      manual_override: !!(raw && raw.manual_override),
+      manual_override_by: (raw && raw.manual_override_by) || null,
+    });
+  }
+
+  function closeEdit() { if (!editBusy) setEditCell(null); }
+
+  function patchEdit(fields) {
+    setEditCell(function(c) { return c ? Object.assign({}, c, fields) : c; });
+  }
+
+  function saveEdit() {
+    if (!editCell || editBusy) return;
+    if (editCell.present && (!editCell.begin || !editCell.end)) {
+      mgToast('warning', 'Completează ora de început și de sfârșit');
+      return;
+    }
+    setEditBusy(true);
+    api('/department-schedule/attendance', {
+      method: 'PUT',
+      body: JSON.stringify({
+        employee_id: editCell.employee_id,
+        work_date: editCell.date,
+        present: !!editCell.present,
+        begin: editCell.present ? editCell.begin : null,
+        end: editCell.present ? editCell.end : null,
+      }),
+    }).then(function(r) {
+      if (r && r.ok) {
+        mgToast('success', 'Pontaj salvat — nu va fi suprascris la sincronizare');
+        setEditCell(null);
+        loadAttendance();
+      } else {
+        mgToast('error', (r && (r.detail || r.message)) || 'Salvare eșuată');
+      }
+    }).catch(function(e) {
+      mgToast('error', String((e && e.message) || e));
+    }).finally(function() { setEditBusy(false); });
+  }
+
+  function revertEdit() {
+    if (!editCell || editBusy) return;
+    setEditBusy(true);
+    api('/department-schedule/attendance', {
+      method: 'PUT',
+      body: JSON.stringify({
+        employee_id: editCell.employee_id,
+        work_date: editCell.date,
+        revert: true,
+      }),
+    }).then(function(r) {
+      if (r && r.ok) {
+        mgToast('success', 'Protecția manuală a fost scoasă. La următoarea sync se preia din CTS.');
+        setEditCell(null);
+        loadAttendance();
+      } else {
+        mgToast('error', (r && (r.detail || r.message)) || 'Revenire eșuată');
+      }
+    }).catch(function(e) {
+      mgToast('error', String((e && e.message) || e));
+    }).finally(function() { setEditBusy(false); });
   }
 
   var employees = (attData && attData.employees) || [];
@@ -7996,9 +8074,21 @@ function DepartmentSchedulePanel() {
                         var raw = emp.days[String(d.day)];
                         var pres = raw && typeof raw === 'object' ? raw.present : raw;
                         var wknd = d.weekday >= 6;
+                        var isManual = !!(raw && raw.manual_override);
+                        var by = raw && raw.manual_override_by;
+                        var manLine = isManual
+                          ? ('Editat manual' + (by ? (' de ' + by) : '') + ' — protejat la sync')
+                          : '';
+                        var tip = (pres === true && raw && raw.begin)
+                          ? (function(){ var wm=Math.max(0,(raw.minutes||0)-30); var wh=Math.floor(wm/60); var rm=wm%60; var partial=(raw.minutes||0)<330; return raw.begin+'\u2013'+raw.end+'\n'+wh+'h'+(rm>0?' '+rm+'m':'')+(partial?'\n\u26a0 Sub 5h':'')+(manLine?'\n'+manLine:'')+'\nClick pentru editare'; })()
+                          : (manLine ? manLine + '\nClick pentru editare' : 'Click pentru editare pontaj');
                         return h('td', { key: d.day,
+                          onClick: function() { openEdit(emp, d, raw); },
+                          title: tip,
                           style: Object.assign({}, cellBorderStyle,
-                            wknd ? { background: 'var(--bg2)' } : {}) },
+                            { cursor: 'pointer' },
+                            wknd ? { background: 'var(--bg2)' } : {},
+                            isManual ? { boxShadow: 'inset 0 -2px 0 #8b5cf6' } : {}) },
                           h('span', {
                             style: {
                               color: pres === true
@@ -8008,12 +8098,11 @@ function DepartmentSchedulePanel() {
                                 : (pres === false ? 'var(--error, #f44336)' : 'var(--t3)'),
                               fontWeight: pres === true ? 700 : 400,
                               fontSize: 15,
-                              cursor: (pres === true && raw && raw.begin) ? 'help' : 'default',
                             },
-                            title: (pres === true && raw && raw.begin)
-                              ? (function(){ var wm=Math.max(0,(raw.minutes||0)-30); var wh=Math.floor(wm/60); var rm=wm%60; var partial=(raw.minutes||0)<330; return raw.begin+'\u2013'+raw.end+'\n'+wh+'h'+(rm>0?' '+rm+'m':'')+(partial?'\n\u26a0 Sub 5h':''); })()
-                              : undefined,
-                          }, pres === true && raw && raw.minutes != null && raw.minutes < 330 ? '\u26a0' : cellIcon(pres))
+                          }, [
+                            pres === true && raw && raw.minutes != null && raw.minutes < 330 ? '\u26a0' : cellIcon(pres),
+                            isManual ? h('span', { key: 'm', style: { fontSize: 9, color: '#8b5cf6', marginLeft: 1 } }, '\u270e') : null,
+                          ])
                         );
                       })
                     )
@@ -8067,11 +8156,118 @@ function DepartmentSchedulePanel() {
             '⚠ Sub 5h'),
           h('span', { key: 'a', style: { color: 'var(--error, #f44336)' } }, '– Absent'),
           h('span', { key: 'n' }, '· Fără date'),
+          h('span', { key: 'man', style: { color: '#8b5cf6' } }, '✎ Editat manual (nu se suprascrie la sync)'),
+          h('span', { key: 'hint', style: { color: 'var(--t3)', fontStyle: 'italic' } },
+            'Click pe o celulă pentru a corecta pontajul'),
         ])
       : null,
 
     msg ? h('div', { key: 'm', style: { margin: '10px 0', fontSize: 13,
       color: 'var(--am)' } }, msg) : null,
+
+    editCell ? (function() {
+      var inp = { padding: '7px 10px', borderRadius: 6, border: '1px solid var(--bd)',
+        background: 'var(--bg2)', color: 'var(--tx)', fontSize: 14, minWidth: 110 };
+      var dateLbl = (function() {
+        try {
+          return new Date(editCell.date + 'T12:00:00').toLocaleDateString('ro-RO', {
+            weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+        } catch (e) { return editCell.date; }
+      })();
+      var isSch1 = editCell.present && editCell.begin === SCH1.begin && editCell.end === SCH1.end;
+      var isSch2 = editCell.present && editCell.begin === SCH2.begin && editCell.end === SCH2.end;
+      var schBtn = function(key, label, times, active, color) {
+        return h('button', {
+          key: key, type: 'button', disabled: editBusy,
+          onClick: function() { patchEdit({ present: true, begin: times.begin, end: times.end }); },
+          style: { padding: '8px 14px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+            border: '1px solid ' + (active ? color : 'var(--bd)'),
+            background: active ? color : 'var(--bg2)', color: active ? '#fff' : 'var(--tx)' },
+        }, label);
+      };
+      return h('div', { key: 'editmodal', className: 'modal-bg',
+        onMouseDown: function(e) { if (e.target === e.currentTarget) closeEdit(); } },
+        h('div', { className: 'modal', style: { width: 460, maxWidth: '100%', height: 'auto',
+          maxHeight: '90vh' } }, [
+          h('div', { key: 'hdr', style: { display: 'flex', alignItems: 'center', gap: 12,
+            padding: '14px 18px', borderBottom: '1px solid var(--bd)' } }, [
+            h('h3', { key: 't', style: { margin: 0, flex: 1, fontSize: 16 } }, 'Editează pontaj'),
+            h('button', { key: 'x', className: 'btn secondary', style: { padding: '4px 12px' },
+              onClick: closeEdit }, '\u00d7'),
+          ]),
+          h('div', { key: 'body', style: { padding: '16px 18px' } }, [
+            h('div', { key: 'who', style: { marginBottom: 14 } }, [
+              h('div', { key: 'n', style: { fontSize: 16, fontWeight: 700 } }, editCell.name),
+              h('div', { key: 'd', style: { fontSize: 13, color: 'var(--t2)', marginTop: 2,
+                textTransform: 'capitalize' } }, dateLbl),
+            ]),
+            editCell.manual_override
+              ? h('div', { key: 'man', style: { marginBottom: 14, padding: '8px 12px', borderRadius: 8,
+                  background: 'rgba(139,92,246,0.1)', border: '1px solid rgba(139,92,246,0.35)',
+                  fontSize: 12, color: 'var(--tx)' } },
+                  'Editat manual' + (editCell.manual_override_by ? (' de ' + editCell.manual_override_by) : '') +
+                  ' — nu se suprascrie la sincronizarea CTS.')
+              : h('div', { key: 'cts', style: { marginBottom: 14, fontSize: 12, color: 'var(--t3)' } },
+                  'După salvare, acest pontaj nu va mai fi suprascris la sync.'),
+            h('div', { key: 'st', style: { marginBottom: 14 } }, [
+              h('div', { key: 'l', style: { fontSize: 12, color: 'var(--t2)', marginBottom: 6,
+                fontWeight: 600 } }, 'Status'),
+              h('div', { key: 'btns', style: { display: 'flex', gap: 8 } }, [
+                h('button', { key: 'p', type: 'button', disabled: editBusy,
+                  onClick: function() { patchEdit({ present: true,
+                    begin: editCell.begin || SCH1.begin, end: editCell.end || SCH1.end }); },
+                  style: { padding: '8px 14px', borderRadius: 8, fontSize: 13, fontWeight: 600,
+                    cursor: 'pointer', border: '1px solid ' + (editCell.present ? 'var(--success, #4caf50)' : 'var(--bd)'),
+                    background: editCell.present ? 'var(--success, #4caf50)' : 'var(--bg2)',
+                    color: editCell.present ? '#fff' : 'var(--tx)' } }, 'Prezent'),
+                h('button', { key: 'a', type: 'button', disabled: editBusy,
+                  onClick: function() { patchEdit({ present: false }); },
+                  style: { padding: '8px 14px', borderRadius: 8, fontSize: 13, fontWeight: 600,
+                    cursor: 'pointer', border: '1px solid ' + (!editCell.present ? 'var(--error, #f44336)' : 'var(--bd)'),
+                    background: !editCell.present ? 'var(--error, #f44336)' : 'var(--bg2)',
+                    color: !editCell.present ? '#fff' : 'var(--tx)' } }, 'Absent'),
+              ]),
+            ]),
+            editCell.present ? h('div', { key: 'hours' }, [
+              h('div', { key: 'l', style: { fontSize: 12, color: 'var(--t2)', marginBottom: 6,
+                fontWeight: 600 } }, 'Schimb'),
+              h('div', { key: 'presets', style: { display: 'flex', gap: 8, flexWrap: 'wrap',
+                marginBottom: 12 } }, [
+                schBtn('s1', 'Schimb 1  ·  08:00–16:30', SCH1, isSch1, '#4caf50'),
+                schBtn('s2', 'Schimb 2  ·  12:00–20:30', SCH2, isSch2, '#3b82f6'),
+              ]),
+              h('div', { key: 'times', style: { display: 'flex', gap: 12, flexWrap: 'wrap' } }, [
+                h('div', { key: 'b' }, [
+                  h('label', { style: { fontSize: 12, color: 'var(--t2)', display: 'block',
+                    marginBottom: 3 } }, 'Intrare'),
+                  h('input', { type: 'time', value: editCell.begin || '', disabled: editBusy,
+                    onChange: function(e) { patchEdit({ begin: e.target.value }); }, style: inp }),
+                ]),
+                h('div', { key: 'e' }, [
+                  h('label', { style: { fontSize: 12, color: 'var(--t2)', display: 'block',
+                    marginBottom: 3 } }, 'Ieșire'),
+                  h('input', { type: 'time', value: editCell.end || '', disabled: editBusy,
+                    onChange: function(e) { patchEdit({ end: e.target.value }); }, style: inp }),
+                ]),
+              ]),
+            ]) : null,
+          ]),
+          h('div', { key: 'ft', style: { display: 'flex', gap: 8, flexWrap: 'wrap',
+            padding: '12px 18px', borderTop: '1px solid var(--bd)', alignItems: 'center' } }, [
+            h('button', { key: 'sv', className: 'btn primary', disabled: editBusy,
+              onClick: saveEdit }, editBusy ? 'Se salvează…' : 'Salvează'),
+            h('button', { key: 'cn', className: 'btn secondary', disabled: editBusy,
+              onClick: closeEdit }, 'Anulează'),
+            editCell.manual_override
+              ? h('button', { key: 'rv', className: 'btn secondary', disabled: editBusy,
+                  style: { marginLeft: 'auto', fontSize: 12 }, onClick: revertEdit,
+                  title: 'Scoate protecția. La următoarea sincronizare se preia din nou din CTS.' },
+                  'Revino la CTS')
+              : null,
+          ]),
+        ])
+      );
+    })() : null,
   ]);
 }
 // Panou Setări → Prompturi AI: încadrarea pe categorie a APELURILOR (pe baza transcriptului).
@@ -15043,14 +15239,14 @@ function SatisfactieDashboard({ onNavigateClient }) {
 
   // ── Buton „?" ───────────────────────────────────────────────────────────
   var FACTOR_DOCS = [
-    { key: 'iris', col: '#06b6d4', title: 'Interpretare IRIS (traiectorie) — singurul KPI',
-      desc: 'IRIS citește transcrierea lunară (apeluri + emailuri) cu promptul V4 de traiectorie și estimează <strong>starea finală 0–100</strong> față de serviciul CargoTrack. Nu există ponderi Emoție/Context și nici restituire matematică — scorul din IRIS este satisfacția.' },
-    { key: 'principles', col: '#a855f7', title: 'Cum judecă IRIS',
-      desc: 'Recența contează cel mai mult; nu există plafonare rigidă pe un incident izolat; traficul pur administrativ și politețea de curtoazie nu scorează; tăcerea clientului ≠ acceptare. Forma traiectoriei (ascendentă, V, deteriorare târzie etc.) e raportată separat de scor.' },
+    { key: 'iris', col: '#06b6d4', title: 'Interpretare IRIS pe săptămână — singurul KPI',
+      desc: 'Pentru fiecare săptămână cu interacțiuni (apeluri/emailuri), IRIS face <strong>un singur apel</strong> cu promptul V4 și dă un scor 0–100. <strong>Nu există apel IRIS pe lună</strong>: scorul lunar = medie ponderată a scorurilor săptămânale după nr. de interacțiuni.' },
+    { key: 'principles', col: '#a855f7', title: 'Cum judecă IRIS (în săptămână)',
+      desc: 'Recența contează cel mai mult în cadrul săptămânii; traficul administrativ și politețea de curtoazie nu scorează; tăcerea ≠ acceptare. Forma traiectoriei săptămânale e raportată separat.' },
     { key: 'financial', col: '#f59e0b', title: 'Axe separate (nu intră în scor)',
-      desc: 'Presiunea financiară companie→client (debit, restricții, suspendări) și recurența de rău platnic se raportează separat. Riscul reputațional/de escaladare se listează explicit, fără să „plătească” scorul doar cu puncte.' },
+      desc: 'Presiunea financiară și recurența de rău platnic se raportează separat. Riscul reputațional/de escaladare se listează explicit.' },
     { key: 'na', col: '#94a3b8', title: 'Cazuri fără scor (N/A)',
-      desc: 'Fără interacțiune, doar trafic administrativ, sau doar axă financiară → <strong>satisfaction_pct = N/A</strong> + notă standardizată (de ce, ce se știe totuși, recomandare). Nu se forțează 100%.' },
+      desc: 'Săptămână fără semnal evaluativ → N/A pe săptămână (nu intră în medie). Dacă toate săptămânile sunt N/A → luna e N/A + notă.' },
   ];
   function openHelpModal() {
     var html = FACTOR_DOCS.map(function(f) {
@@ -15064,10 +15260,10 @@ function SatisfactieDashboard({ onNavigateClient }) {
     }).join('');
     html += '<hr style="border:none;border-top:1px solid var(--bd,#30363d);margin:14px 0">'
       + '<div style="font-size:12px;color:var(--t2,#8b9ab5);line-height:1.6">'
-      + '<strong>Scorul final</strong> = starea finală IRIS din promptul V4 (un singur KPI).<br>'
+      + '<strong>Scorul lunar</strong> = Σ (scor_săptămână × nr_interacțiuni) / Σ nr_interacțiuni — fără reinterpretare IRIS pe lună.<br>'
       + 'Categorii tipice: Ambasador 90–100 · Foarte satisfăcut 75–89 · Satisfăcut 60–74 · Neutru 45–59 · Nemulțumit 30–44 · Critic 0–29.<br>'
       + 'Segment intern UI: <strong>Sănătos</strong> ≥70% · <strong>Neutru</strong> 45-69% · <strong>La risc</strong> 25-44% · <strong>Critic</strong> &lt;25%. Prag nesatisfăcut: sub 70%.<br>'
-      + '<strong>Sursa datelor</strong>: CTS ground-truth (mailuri + apeluri) pe luna calendaristică.'
+      + '<strong>Sursa datelor</strong>: CTS ground-truth (mailuri + apeluri) pe luna calendaristică, grupate pe săptămâni ISO.'
       + '</div>';
     Swal.fire({
       title: 'Cum se calculează satisfacția?',

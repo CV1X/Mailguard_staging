@@ -1507,8 +1507,78 @@ Returnează STRICT JSON:
 }"""
 
 
+def _salvage_satisfaction_json(text: str) -> Optional[dict]:
+    """Recuperează câmpurile esențiale din JSON IRIS trunchiat (max_tokens)."""
+    import re
+    if not text:
+        return None
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```(?:json)?\s*", "", t)
+        t = re.sub(r"\s*```\s*$", "", t)
+    try:
+        obj = json.loads(t)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+
+    # Închide array/obiecte trunchiate: taie la ultimul obiect complet din trajectory_events
+    cut = t
+    # încearcă să închidă JSON-ul după ultimul `},` complet din events
+    idx = cut.rfind("},\n")
+    if idx < 0:
+        idx = cut.rfind("},")
+    if idx > 0 and '"trajectory_events"' in cut[:idx]:
+        candidate = cut[: idx + 1] + "], \"reputation_risks\": [], \"escalation_risks\": [], \"financial_risk\": null, \"reasoning\": null, \"suggestions\": []}"
+        # dacă reasoning există deja mai sus, ok; altfel null
+        try:
+            # balanță acolade brute
+            opens = candidate.count("{") - candidate.count("}")
+            if opens > 0:
+                candidate += "}" * opens
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+
+    out: Dict[str, Any] = {}
+    m = re.search(r'"satisfaction_pct"\s*:\s*(null|-?\d+(?:\.\d+)?)', t)
+    if m:
+        out["satisfaction_pct"] = None if m.group(1) == "null" else float(m.group(1))
+
+    def _str_field(name: str) -> Optional[str]:
+        mm = re.search(rf'"{name}"\s*:\s*"((?:\\.|[^"\\])*)"', t)
+        if not mm:
+            return None
+        try:
+            return json.loads('"' + mm.group(1) + '"')
+        except Exception:
+            return mm.group(1)
+
+    for key in ("no_score_label", "no_score_note", "category", "trajectory_shape", "reasoning"):
+        val = _str_field(key)
+        if val is not None:
+            out[key] = val
+    # dacă reasoning lipsește, folosește no_score_note
+    if not out.get("reasoning") and out.get("no_score_note"):
+        out["reasoning"] = out["no_score_note"]
+    out.setdefault("trajectory_events", [])
+    out.setdefault("reputation_risks", [])
+    out.setdefault("escalation_risks", [])
+    out.setdefault("suggestions", [])
+    if any(k in out for k in ("satisfaction_pct", "no_score_label", "reasoning", "category")):
+        out["_salvaged"] = True
+        return out
+    return None
+
+
 def _iris_call(system: str, payload: dict, max_tokens: int = 500) -> Optional[dict]:
-    """Apel IRIS cu JSON. Returnează dict-ul parsat sau None dacă IRIS indisponibil/eșec."""
+    """Apel IRIS cu JSON. Returnează dict-ul parsat sau None dacă IRIS indisponibil/eșec.
+
+    Dacă gateway-ul întoarce JSON_PARSE_ERROR pe răspuns trunchiat (max_tokens),
+    încearcă recuperarea câmpurilor esențiale din raw_text.
+    """
     try:
         from app.services import iris_ai
     except Exception:
@@ -1525,15 +1595,31 @@ def _iris_call(system: str, payload: dict, max_tokens: int = 500) -> Optional[di
             max_tokens=max_tokens,
             client="Cargo360-SatisfactionV4",
             no_cache=True,
+            task="satisfaction_v4_trajectory",
         )
         if resp and resp.get("ok"):
             parsed = resp.get("parsed")
             if not isinstance(parsed, dict) and resp.get("text"):
-                try:
-                    parsed = json.loads(resp["text"])
-                except Exception:
-                    parsed = None
+                parsed = _salvage_satisfaction_json(resp.get("text") or "")
             return parsed if isinstance(parsed, dict) else None
+
+        # eșec oficial — încearcă salvage din raw_text (caz tipic: output tăiat la max_tokens)
+        err = (resp or {}).get("error") or {}
+        raw = err.get("raw_text") or (resp or {}).get("text") or ""
+        salvaged = _salvage_satisfaction_json(raw)
+        if salvaged:
+            logger.warning(
+                "satisfaction v4: JSON IRIS invalid/trunchiat — recuperat câmpuri esențiale (code=%s keys=%s)",
+                err.get("code"),
+                sorted(k for k in salvaged.keys() if not k.startswith("_")),
+            )
+            return salvaged
+        if err:
+            logger.warning(
+                "satisfaction v4: apel IRIS eșuat code=%s msg=%s",
+                err.get("code"),
+                str(err.get("message") or "")[:200],
+            )
     except Exception:
         logger.warning("satisfaction v4: apel IRIS eșuat", exc_info=True)
     return None
@@ -1576,13 +1662,14 @@ def compute_satisfaction_v4(
     use_ai: bool = True,
     skip_exclude_check: bool = False,
 ) -> dict:
-    """Scor satisfacție v4 — IRIS pe săptămâni, apoi pe lună (prompt traiectorie V4).
+    """Scor satisfacție v4 — 1 apel IRIS per săptămână cu interacțiuni; luna = medie.
 
-    1) Bucketează interacțiunile pe săptămâni ISO și apelează IRIS (no_cache) pe fiecare.
-    2) Apelează IRIS din nou pe toată luna, cu rezumatele săptămânale ca context.
-    Scorul oficial al lunii = satisfaction_pct din apelul lunar.
+    Nu există apel IRIS separat pe lună. Scorul lunar = medie ponderată a scorurilor
+    săptămânale cu greutatea = nr. interacțiuni din săptămână (echivalent cu media pe
+    interacțiuni dacă fiecare moștenește scorul săptămânii sale).
     """
     import time as _time
+    import re
 
     now = month_end
     cfg = _load_v4_config(cur)
@@ -1590,7 +1677,7 @@ def compute_satisfaction_v4(
         "version": "v4_trajectory",
         "prompt_version": "V4",
         "weights": cfg,
-        "granularity": "week_then_month",
+        "granularity": "week_iris_month_avg",
         "no_cache": True,
     }
 
@@ -1632,6 +1719,8 @@ def compute_satisfaction_v4(
             "escalation_risks": [],
             "financial_risk": None,
             "suggestions": [],
+            "iris_calls": 0,
+            "month_aggregation": "weighted_avg_weeks",
         }
         if extra:
             breakdown.update(extra)
@@ -1643,7 +1732,7 @@ def compute_satisfaction_v4(
             "computed_at": now.isoformat(),
         }
 
-    if len(received) == 0 and len(sent) == 0:
+    if n == 0:
         return _na_result(
             "Neutru — fără interacțiune (necesită contact proactiv)",
             "De ce N/A: nicio interacțiune (apel/email) în luna analizată. "
@@ -1653,20 +1742,20 @@ def compute_satisfaction_v4(
         )
 
     if not use_ai:
-        breakdown = {
-            "scoring_mode": "v4_trajectory_no_ai",
-            "single_kpi": "iris_stare_finala",
-            "total_interactions": n,
-            "segment": "sanatos",
-            "red_flags_active": [],
-            "iris_reasoning": "AI dezactivat — scor neutru 75.",
-            "weekly_trajectories": [],
-            "trajectory_events": [],
-        }
         return {
             "satisfaction_pct": 75.0,
             "is_unsatisfied": False,
-            "breakdown": breakdown,
+            "breakdown": {
+                "scoring_mode": "v4_trajectory_no_ai",
+                "single_kpi": "iris_stare_finala",
+                "total_interactions": n,
+                "segment": "sanatos",
+                "iris_reasoning": "AI dezactivat — scor neutru 75.",
+                "weekly_trajectories": [],
+                "trajectory_events": [],
+                "iris_calls": 0,
+                "month_aggregation": "weighted_avg_weeks",
+            },
             "config_used": config_used,
             "computed_at": now.isoformat(),
         }
@@ -1687,8 +1776,7 @@ def compute_satisfaction_v4(
             return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except Exception:
             try:
-                dt = datetime.strptime(s[:10], "%Y-%m-%d")
-                return dt.replace(tzinfo=timezone.utc)
+                return datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
             except Exception:
                 return None
 
@@ -1697,214 +1785,185 @@ def compute_satisfaction_v4(
         return f"{iso.year}-W{iso.week:02d}"
 
     def _week_bounds(dt: datetime) -> Tuple[datetime, datetime]:
-        # luni 00:00 UTC → luni următoare
         d = dt.astimezone(timezone.utc)
         monday = (d - timedelta(days=d.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
         return monday, monday + timedelta(days=7)
 
-    def _bucket_weeks(recv: List[dict], snd: List[dict]) -> List[dict]:
-        buckets: Dict[str, dict] = {}
-        order: List[str] = []
-        for kind, items in (("received", recv), ("sent", snd)):
-            for it in items:
-                dt = _item_dt(it) or month_start
-                wk = _week_key(dt)
-                if wk not in buckets:
-                    w0, w1 = _week_bounds(dt)
-                    # clip to month window
-                    w0 = max(w0, month_start if month_start.tzinfo else month_start.replace(tzinfo=timezone.utc))
-                    w1 = min(w1, month_end if month_end.tzinfo else month_end.replace(tzinfo=timezone.utc))
-                    buckets[wk] = {"week_key": wk, "start": w0, "end": w1, "received": [], "sent": []}
-                    order.append(wk)
-                buckets[wk][kind].append(it)
-        return [buckets[k] for k in order]
+    def _parse_pct(v) -> Optional[float]:
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return round(_clamp(float(v)), 1)
+        s = str(v).strip().replace(",", ".")
+        if s.lower() in ("", "null", "none", "n/a", "na"):
+            return None
+        m = re.search(r"-?\d+(?:\.\d+)?", s)
+        if not m:
+            return None
+        try:
+            return round(_clamp(float(m.group(0))), 1)
+        except ValueError:
+            return None
 
-    def _parse_iris(parsed: Optional[dict]) -> dict:
-        if not isinstance(parsed, dict):
-            return {"ok": False}
-        raw_pct = parsed.get("satisfaction_pct", None)
-        pct = None
-        if raw_pct is not None and str(raw_pct).strip().lower() not in ("", "null", "none", "n/a", "na"):
-            try:
-                pct = round(_clamp(float(raw_pct)), 1)
-            except (TypeError, ValueError):
-                pct = None
-        events = parsed.get("trajectory_events") if isinstance(parsed.get("trajectory_events"), list) else []
-        return {
-            "ok": True,
-            "satisfaction_pct": pct,
-            "no_score_label": parsed.get("no_score_label") or None,
-            "no_score_note": parsed.get("no_score_note") or None,
-            "category": parsed.get("category") or None,
-            "trajectory_shape": parsed.get("trajectory_shape"),
-            "reasoning": parsed.get("reasoning") or "",
-            "trajectory_events": events[:50],
-            "reputation_risks": parsed.get("reputation_risks") if isinstance(parsed.get("reputation_risks"), list) else [],
-            "escalation_risks": parsed.get("escalation_risks") if isinstance(parsed.get("escalation_risks"), list) else [],
-            "financial_risk": parsed.get("financial_risk") if isinstance(parsed.get("financial_risk"), dict) else parsed.get("financial_risk"),
-            "suggestions": parsed.get("suggestions") if isinstance(parsed.get("suggestions"), list) else [],
-        }
+    # Bucket pe săptămâni ISO (doar cele cu interacțiuni)
+    buckets: Dict[str, dict] = {}
+    order: List[str] = []
+    ms = month_start if month_start.tzinfo else month_start.replace(tzinfo=timezone.utc)
+    me = month_end if month_end.tzinfo else month_end.replace(tzinfo=timezone.utc)
+    for kind, items in (("received", received), ("sent", sent)):
+        for it in items:
+            dt = _item_dt(it) or ms
+            wk = _week_key(dt)
+            if wk not in buckets:
+                w0, w1 = _week_bounds(dt)
+                buckets[wk] = {
+                    "week_key": wk,
+                    "start": max(w0, ms),
+                    "end": min(w1, me),
+                    "received": [],
+                    "sent": [],
+                }
+                order.append(wk)
+            buckets[wk][kind].append(it)
 
-    def _run_iris(period_label: str, period: dict, recv: List[dict], snd: List[dict], extra: Optional[dict] = None) -> dict:
-        payload = {
-            "perioada": period,
-            "nivel_analiza": period_label,
-            "instructiune": (
-                f"Analizează traiectoria de satisfacție la nivel de {period_label} pentru ACEST client. "
-                "Interacțiunile de mai jos sunt [TRANSCRIEREA CONVERSAȚIEI] (apeluri + emailuri), "
-                "ordonate cronologic. Respectă promptul de sistem V4. "
-                "Nu folosi scoruri memorate/cache — evaluează DOAR pe textul furnizat."
-            ),
-            "total_interactiuni": len(recv) + len(snd),
-            "interactiuni": _iris_payload_interactions(recv, snd, text_limit=2500),
-        }
-        if extra:
-            payload.update(extra)
-        return _parse_iris(_iris_call(_load_trajectory_v4_system(), payload, max_tokens=4000))
-
-    system = _load_trajectory_v4_system()  # warm cache local file; IRIS call remains no_cache
-    _ = system
-
-    weeks = _bucket_weeks(received, sent)
     weekly_rows: List[dict] = []
     merged_events: List[dict] = []
     iris_calls = 0
+    all_rep: List = []
+    all_esc: List = []
+    all_sug: List = []
+    last_fin = None
 
-    for i, wb in enumerate(weeks):
+    for i, wk in enumerate(order):
+        wb = buckets[wk]
         w_recv, w_sent = wb["received"], wb["sent"]
-        if not w_recv and not w_sent:
+        n_w = len(w_recv) + len(w_sent)
+        if n_w == 0:
             continue
         period = {
-            "week_key": wb["week_key"],
+            "week_key": wk,
             "week_start": wb["start"].date().isoformat(),
             "week_end_exclusive": wb["end"].date().isoformat(),
         }
-        wres = _run_iris("saptamana", period, w_recv, w_sent)
-        iris_calls += 1
-        row = {
-            "week_key": wb["week_key"],
-            "week_start": period["week_start"],
-            "week_end_exclusive": period["week_end_exclusive"],
-            "n_interactions": len(w_recv) + len(w_sent),
-            "satisfaction_pct": wres.get("satisfaction_pct"),
-            "category": wres.get("category") or wres.get("no_score_label"),
-            "trajectory_shape": wres.get("trajectory_shape"),
-            "iris_reasoning": wres.get("reasoning") or wres.get("no_score_note") or "",
-            "no_score_label": wres.get("no_score_label"),
-            "trajectory_events": wres.get("trajectory_events") or [],
-            "iris_ok": bool(wres.get("ok")),
-        }
-        weekly_rows.append(row)
-        for ev in (wres.get("trajectory_events") or []):
-            if isinstance(ev, dict):
-                ev = dict(ev)
-                ev.setdefault("week_key", wb["week_key"])
-                merged_events.append(ev)
-        if i < len(weeks) - 1:
-            _time.sleep(0.4)
-
-    week_summaries = [
-        {
-            "week_key": r["week_key"],
-            "satisfaction_pct": r["satisfaction_pct"],
-            "category": r["category"],
-            "trajectory_shape": r["trajectory_shape"],
-            "reasoning": (r.get("iris_reasoning") or "")[:400],
-            "n_interactions": r["n_interactions"],
-        }
-        for r in weekly_rows
-    ]
-
-    month_period = {
-        "month_start": month_start.date().isoformat() if hasattr(month_start, "date") else str(month_start)[:10],
-        "month_end_exclusive": month_end.date().isoformat() if hasattr(month_end, "date") else str(month_end)[:10],
-    }
-    mres = _run_iris(
-        "luna",
-        month_period,
-        received,
-        sent,
-        extra={
-            "rezumate_saptamanale_deja_analizate": week_summaries,
-            "nota": (
-                "Ai mai sus rezultatele IRIS pe săptămâni (fără cache). "
-                "Starea finală a LUNII trebuie să reflecte traiectoria pe toată perioada, "
-                "ponderată spre ultimele evenimente relevante — nu media aritmetică a săptămânilor."
+        payload = {
+            "perioada": period,
+            "nivel_analiza": "saptamana",
+            "instructiune": (
+                "Analizează traiectoria de satisfacție DOAR pentru această SĂPTĂMÂNĂ (prompt V4). "
+                "Interacțiunile = [TRANSCRIEREA CONVERSAȚIEI]. Fără cache. "
+                "JSON COMPACT: trajectory_events maxim 10 (explanation ≤1 propoziție); "
+                "satisfaction_pct = starea finală a săptămânii."
             ),
-        },
-    )
-    iris_calls += 1
+            "total_interactiuni": n_w,
+            "interactiuni": _iris_payload_interactions(w_recv, w_sent, text_limit=1400),
+        }
+        parsed = _iris_call(_load_trajectory_v4_system(), payload, max_tokens=5000)
+        iris_calls += 1
+        if not parsed:
+            row = {
+                "week_key": wk,
+                "week_start": period["week_start"],
+                "week_end_exclusive": period["week_end_exclusive"],
+                "n_interactions": n_w,
+                "satisfaction_pct": None,
+                "category": "IRIS eșuat pe săptămână",
+                "trajectory_shape": None,
+                "iris_reasoning": "Apel IRIS eșuat pentru această săptămână.",
+                "no_score_label": "IRIS eșuat",
+                "trajectory_events": [],
+                "iris_ok": False,
+            }
+        else:
+            pct_w = _parse_pct(parsed.get("satisfaction_pct"))
+            events = parsed.get("trajectory_events") if isinstance(parsed.get("trajectory_events"), list) else []
+            for ev in events:
+                if isinstance(ev, dict):
+                    ev = dict(ev)
+                    ev["week_key"] = wk
+                    merged_events.append(ev)
+            reasoning = parsed.get("reasoning") or parsed.get("no_score_note") or ""
+            row = {
+                "week_key": wk,
+                "week_start": period["week_start"],
+                "week_end_exclusive": period["week_end_exclusive"],
+                "n_interactions": n_w,
+                "satisfaction_pct": pct_w,
+                "category": parsed.get("category") or parsed.get("no_score_label"),
+                "trajectory_shape": parsed.get("trajectory_shape"),
+                "iris_reasoning": reasoning,
+                "no_score_label": parsed.get("no_score_label"),
+                "trajectory_events": events[:20],
+                "iris_ok": True,
+            }
+            if isinstance(parsed.get("reputation_risks"), list):
+                all_rep.extend(parsed["reputation_risks"][:5])
+            if isinstance(parsed.get("escalation_risks"), list):
+                all_esc.extend(parsed["escalation_risks"][:5])
+            if isinstance(parsed.get("suggestions"), list):
+                all_sug.extend(parsed["suggestions"][:3])
+            if isinstance(parsed.get("financial_risk"), dict):
+                last_fin = parsed["financial_risk"]
+        weekly_rows.append(row)
+        if i < len(order) - 1:
+            _time.sleep(0.25)
 
-    if not mres.get("ok"):
-        # fallback: ultima săptămână cu scor
-        fallback_pct = None
-        for r in reversed(weekly_rows):
-            if r.get("satisfaction_pct") is not None:
-                fallback_pct = r["satisfaction_pct"]
-                break
-        if fallback_pct is None:
-            breakdown = {
-                "scoring_mode": "v4_trajectory_iris_fail",
-                "single_kpi": "iris_stare_finala",
-                "total_interactions": n,
-                "segment": "sanatos",
-                "red_flags_active": [],
-                "iris_reasoning": "IRIS indisponibil/eșec pe lună — scor neutru 75.",
+    # Luna = medie ponderată pe interacțiuni (fără apel IRIS lunar)
+    scored = [(r["satisfaction_pct"], r["n_interactions"]) for r in weekly_rows if r.get("satisfaction_pct") is not None]
+    if not scored:
+        # toate săptămânile N/A / eșec
+        notes = [r.get("iris_reasoning") or r.get("no_score_label") or "" for r in weekly_rows]
+        note = " ".join(x for x in notes if x)[:800] or "Nicio săptămână nu a produs scor IRIS."
+        return _na_result(
+            "Semnal insuficient pentru un scor de satisfacție",
+            note,
+            interactions=n,
+            extra={
                 "weekly_trajectories": weekly_rows,
                 "trajectory_events": merged_events[:80],
                 "iris_calls": iris_calls,
-            }
-            return {
-                "satisfaction_pct": 75.0,
-                "is_unsatisfied": False,
-                "breakdown": breakdown,
-                "config_used": config_used,
-                "computed_at": now.isoformat(),
-            }
-        mres = {
-            "ok": True,
-            "satisfaction_pct": fallback_pct,
-            "category": "Fallback din ultima săptămână scorată",
-            "trajectory_shape": None,
-            "reasoning": "Apelul lunar IRIS a eșuat — folosită starea finală a ultimei săptămâni analizate.",
-            "trajectory_events": merged_events,
-            "reputation_risks": [],
-            "escalation_risks": [],
-            "financial_risk": None,
-            "suggestions": [],
-            "no_score_label": None,
-            "no_score_note": None,
-        }
+                "reputation_risks": all_rep[:15],
+                "escalation_risks": all_esc[:15],
+                "financial_risk": last_fin,
+                "suggestions": all_sug[:10],
+            },
+        )
 
-    pct = mres.get("satisfaction_pct")
-    events = mres.get("trajectory_events") or []
-    # Preferă evenimentele săptămânale (mai granulare); completează cu cele lunare dacă lipsesc
-    if merged_events:
-        events = merged_events
-    elif events:
-        events = events[:80]
+    weight_sum = sum(w for _, w in scored) or 1
+    month_pct = round(_clamp(sum(p * w for p, w in scored) / weight_sum), 1)
+
+    # raționament agregat (nu IRIS lunar)
+    parts = []
+    for r in weekly_rows:
+        if r.get("satisfaction_pct") is None:
+            continue
+        parts.append(
+            f"{r['week_key']}: {r['satisfaction_pct']}% ({r['n_interactions']} interacțiuni)"
+            + (f" — {(r.get('iris_reasoning') or '')[:160]}" if r.get("iris_reasoning") else "")
+        )
+    reasoning = (
+        f"Scor lunar = medie ponderată pe interacțiuni din scorurile săptămânale IRIS "
+        f"({month_pct}%; {len(scored)} săptămâni scorate, {weight_sum} interacțiuni). "
+        + " | ".join(parts)
+    )[:1200]
+
+    # categorie din scorul mediu
+    if month_pct >= 90:
+        category = "Ambasador"
+    elif month_pct >= 75:
+        category = "Foarte satisfăcut"
+    elif month_pct >= 60:
+        category = "Satisfăcut"
+    elif month_pct >= 45:
+        category = "Neutru / satisfacție moderată — recomandat follow-up"
+    elif month_pct >= 30:
+        category = "Nemulțumit — necesită intervenție"
     else:
-        events = []
+        category = "Critic / risc de pierdere a clientului"
 
-    if pct is None:
-        label = mres.get("no_score_label") or mres.get("category") or "Trafic administrativ, semnal insuficient pentru un scor de satisfacție"
-        note = mres.get("no_score_note") or mres.get("reasoning") or "IRIS nu a putut stabili un scor de satisfacție pe baza semnalului din lună."
-        out = _na_result(label, note, interactions=n, extra={
-            "weekly_trajectories": weekly_rows,
-            "trajectory_events": events[:80],
-            "reputation_risks": mres.get("reputation_risks") or [],
-            "escalation_risks": mres.get("escalation_risks") or [],
-            "financial_risk": mres.get("financial_risk"),
-            "suggestions": (mres.get("suggestions") or [])[:10],
-            "iris_calls": iris_calls,
-        })
-        return out
+    shapes = [r.get("trajectory_shape") for r in weekly_rows if r.get("trajectory_shape")]
+    shape = shapes[-1] if shapes else "Agregat săptămânal"
 
-    is_unsatisfied = pct < 70.0
-    segment = _segment(pct)
-    reasoning = mres.get("reasoning") or ""
-    category = mres.get("category")
-    shape = mres.get("trajectory_shape")
+    segment = _segment(month_pct)
     breakdown = {
         "scoring_mode": "v4_trajectory",
         "single_kpi": "iris_stare_finala",
@@ -1914,24 +1973,30 @@ def compute_satisfaction_v4(
         "iris_reasoning": reasoning,
         "category": category,
         "trajectory_shape": shape,
-        "trajectory_events": events[:80],
+        "trajectory_events": merged_events[:80],
         "weekly_trajectories": weekly_rows,
         "no_score_label": None,
         "no_score_note": None,
-        "reputation_risks": mres.get("reputation_risks") or [],
-        "escalation_risks": mres.get("escalation_risks") or [],
-        "financial_risk": mres.get("financial_risk"),
-        "suggestions": (mres.get("suggestions") or [])[:10],
+        "reputation_risks": all_rep[:15],
+        "escalation_risks": all_esc[:15],
+        "financial_risk": last_fin,
+        "suggestions": all_sug[:10],
         "iris_calls": iris_calls,
+        "month_aggregation": "weighted_avg_weeks",
+        "month_avg_detail": {
+            "weeks_scored": len(scored),
+            "weight_interactions": weight_sum,
+            "formula": "sum(week_pct * n_interactions) / sum(n_interactions)",
+        },
         "iris_holistic": {
             "reasoning": reasoning,
-            "dominant_signal": category or "",
+            "dominant_signal": category,
             "trend_assessment": shape or "",
         },
     }
     return {
-        "satisfaction_pct": pct,
-        "is_unsatisfied": is_unsatisfied,
+        "satisfaction_pct": month_pct,
+        "is_unsatisfied": month_pct < 70.0,
         "breakdown": breakdown,
         "config_used": config_used,
         "computed_at": now.isoformat(),
