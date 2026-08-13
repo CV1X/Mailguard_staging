@@ -14,6 +14,7 @@ import json
 import logging
 import math
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.services.category_classifier import _email_body
@@ -1020,35 +1021,36 @@ def compute_satisfaction_ai(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MOTOR v4 — per lună calendaristică, transparent (2026-07-24)
+# MOTOR v4 — traiectorie IRIS (prompt V4, 2026-08)
 #
-# Fiecare client pornește de la 100% în fiecare lună. Zero interacțiuni → 100%.
-#   Scor final = Emoție × 0.70 + ContextIRIS × 0.30, apoi restituire (max 50%).
-#
-# KPI Emoție (70%), determinist + o judecată IRIS:
-#   -10 per sesizare, -20 per reclamație (categorie din CTS ground-truth),
-#   -5 per revenire explicită pe problemă nerezolvată (marcate de IRIS, per mesaj).
-#   Clamp [0,100].
-# KPI ContextIRIS (30%): IRIS citește tot contextul lunii → scor 0-100 realist.
-# Restituire: dacă IRIS vede rezolvare→mulțumire în 48h, restituie ≤50% din
-#   penalitățile totale, aplicat pe scorul final.
+# Un singur KPI: starea finală 0-100 (sau N/A) din promptul de traiectorie V4.
+# Fără piloni Emoție/Context/Restituire. Fără boost/floor pe scorul IRIS.
 #
 # Sursa datelor: cts_ground_truth (mailuri) + cts_calls_ground_truth (apeluri),
-#   tabelele CTS ground-truth. Categorie normalizată {informatie, sesizare, reclamatie}.
-# Legare mail↔client: emails.client_id, fallback pe domeniul expeditorului
-#   (clients.emails e murdar cu ';' multiple). Apel↔client: calls.client_id,
-#   fallback phone_match pe caller/callee (numerele CargoTrack 037443006x ignorate).
+#   pe luna calendaristică [month_start, month_end).
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Config default (suprascriabil din settings key 'satisfaction.v4')
+_TRAJECTORY_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "satisfaction_trajectory_v4.txt"
+_TRAJECTORY_SYSTEM_CACHE: Optional[str] = None
+
+# Config legacy (păstrat pentru compatibilitate settings; nu mai ponderăm piloni)
 _V4_DEFAULTS = {
     "pen_sesizare": 10.0,
     "pen_reclamatie": 20.0,
     "pen_recontact": 5.0,
-    "w_emotion": 0.70,
-    "w_context": 0.30,
-    "recovery_max": 0.50,
+    "w_emotion": 0.0,
+    "w_context": 1.0,
+    "recovery_max": 0.0,
+    "mode": "iris_trajectory_v4",
+    "prompt_version": "V4",
 }
+
+
+def _load_trajectory_v4_system() -> str:
+    global _TRAJECTORY_SYSTEM_CACHE
+    if _TRAJECTORY_SYSTEM_CACHE is None:
+        _TRAJECTORY_SYSTEM_CACHE = _TRAJECTORY_PROMPT_PATH.read_text(encoding="utf-8")
+    return _TRAJECTORY_SYSTEM_CACHE
 
 # Numere interne CargoTrack (nu sunt clienți) — se ignoră la maparea apel→client
 _CARGOTRACK_PHONE_PREFIXES = ("037443006",)
@@ -1067,10 +1069,17 @@ def _load_v4_config(cur) -> dict:
             if isinstance(val, dict):
                 for k in cfg:
                     if k in val and val[k] is not None:
+                        if isinstance(cfg[k], str):
+                            cfg[k] = str(val[k])
+                            continue
                         try:
                             cfg[k] = float(val[k])
                         except (TypeError, ValueError):
                             pass
+                # păstrează și chei noi (mode/prompt_version) chiar dacă nu sunt în defaults numerice
+                for k in ("mode", "prompt_version", "single_kpi"):
+                    if k in val and val[k] is not None:
+                        cfg[k] = val[k]
     except Exception:
         logger.warning("satisfaction v4: nu am putut citi settings satisfaction.v4, folosesc defaults", exc_info=True)
     return cfg
@@ -1530,7 +1539,7 @@ def _iris_call(system: str, payload: dict, max_tokens: int = 500) -> Optional[di
     return None
 
 
-def _iris_payload_interactions(received: List[dict], sent: List[dict] = None) -> list:
+def _iris_payload_interactions(received: List[dict], sent: List[dict] = None, *, text_limit: int = 600) -> list:
     """Serializează interacțiunile pentru IRIS (câmpuri relevante, text trunchiat)."""
     out = []
     for i in received:
@@ -1541,9 +1550,10 @@ def _iris_payload_interactions(received: List[dict], sent: List[dict] = None) ->
             "subiect": i.get("subject") or None,
             "thread": i.get("thread_key") or None,
             "data": i.get("date"),
-            "text": (i.get("text") or "")[:600],
+            "text": (i.get("text") or "")[:text_limit],
         })
     if sent:
+        sent_limit = max(500, text_limit - 100)
         for s in sent:
             out.append({
                 "ref": s.get("ref"),
@@ -1551,7 +1561,7 @@ def _iris_payload_interactions(received: List[dict], sent: List[dict] = None) ->
                 "subiect": s.get("subject") or None,
                 "thread": s.get("thread_key") or None,
                 "data": s.get("date"),
-                "text": (s.get("text") or "")[:500],
+                "text": (s.get("text") or "")[:sent_limit],
             })
     return out
 
@@ -1566,14 +1576,24 @@ def compute_satisfaction_v4(
     use_ai: bool = True,
     skip_exclude_check: bool = False,
 ) -> dict:
-    """Scor de satisfacție v4 — per lună calendaristică [month_start, month_end).
+    """Scor satisfacție v4 — IRIS pe săptămâni, apoi pe lună (prompt traiectorie V4).
 
-    Final = Emoție(70%) × 0.70 + ContextIRIS(30%) × 0.30, apoi restituire (≤50% din penalizări).
-    Interfața de retur e compatibilă cu satisfaction_snapshot.py și endpoint-ul estimate.
+    1) Bucketează interacțiunile pe săptămâni ISO și apelează IRIS (no_cache) pe fiecare.
+    2) Apelează IRIS din nou pe toată luna, cu rezumatele săptămânale ca context.
+    Scorul oficial al lunii = satisfaction_pct din apelul lunar.
     """
-    now = month_end  # referință temporală = sfârșitul lunii
+    import time as _time
 
-    # Excludere client (partener/furnizor)
+    now = month_end
+    cfg = _load_v4_config(cur)
+    config_used = {
+        "version": "v4_trajectory",
+        "prompt_version": "V4",
+        "weights": cfg,
+        "granularity": "week_then_month",
+        "no_cache": True,
+    }
+
     if not skip_exclude_check:
         try:
             cur.execute("SELECT satisfaction_exclude FROM clients WHERE id = %s", (client_id,))
@@ -1583,164 +1603,336 @@ def compute_satisfaction_v4(
                     "satisfaction_pct": None,
                     "is_unsatisfied": False,
                     "breakdown": {"scoring_mode": "excluded"},
-                    "config_used": {"version": "v4"},
+                    "config_used": config_used,
                     "computed_at": now.isoformat(),
                     "error": "excluded",
                 }
         except Exception:
             pass
 
-    cfg = _load_v4_config(cur)
     received, sent = _fetch_month_interactions(client_id, cur, month_start, month_end)
-    n = len(received)
+    n = len(received) + len(sent)
 
-    # Zero interacțiuni → rămâne 100% (regula fundamentală a userului)
-    if n == 0:
+    def _na_result(label: str, note: str, *, interactions: int, extra: Optional[dict] = None) -> dict:
         breakdown = {
-            "scoring_mode": "no_data",
-            "total_interactions": 0,
-            "segment": "sanatos",
+            "scoring_mode": "v4_trajectory_na",
+            "store_null": True,
+            "single_kpi": "iris_stare_finala",
+            "total_interactions": interactions,
+            "segment": "neutru",
             "red_flags_active": [],
-            "iris_holistic": {"reasoning": "Nicio interacțiune în lună — satisfacție implicită 100%.",
-                              "dominant_signal": "fără activitate", "trend_assessment": "stabil"},
-            "iris_reasoning": "Nicio interacțiune în lună — satisfacție implicită 100%.",
+            "no_score_label": label,
+            "no_score_note": note,
+            "iris_reasoning": note,
+            "category": label,
+            "trajectory_shape": None,
+            "trajectory_events": [],
+            "weekly_trajectories": [],
+            "reputation_risks": [],
+            "escalation_risks": [],
+            "financial_risk": None,
+            "suggestions": [],
         }
+        if extra:
+            breakdown.update(extra)
         return {
-            "satisfaction_pct": 100.0,
+            "satisfaction_pct": None,
             "is_unsatisfied": False,
             "breakdown": breakdown,
-            "config_used": {"version": "v4", "weights": cfg},
+            "config_used": config_used,
             "computed_at": now.isoformat(),
         }
 
-    # ── KPI Emoție (determinist, categorii) ─────────────────────────────────────
-    emotion_base, emo_sub = _pillar_emotion_v4(received, cfg)
+    if len(received) == 0 and len(sent) == 0:
+        return _na_result(
+            "Neutru — fără interacțiune (necesită contact proactiv)",
+            "De ce N/A: nicio interacțiune (apel/email) în luna analizată. "
+            "Ce se știe: fără semnal pe axa de serviciu sau financiară în fereastra curentă. "
+            "Recomandare: contact proactiv sau extinderea ferestrei pentru semnal real.",
+            interactions=0,
+        )
 
-    # ── Apel IRIS #1: reveniri explicite pe problemă nerezolvată ────────────────
-    n_recontacts = 0
-    recontact_detail = []
-    if use_ai:
-        rc = _iris_call(_V4_RECONTACT_SYSTEM, {
-            "total_mesaje": n,
-            "mesaje_primite": _iris_payload_interactions(received),
-        }, max_tokens=600)
-        if rc:
+    if not use_ai:
+        breakdown = {
+            "scoring_mode": "v4_trajectory_no_ai",
+            "single_kpi": "iris_stare_finala",
+            "total_interactions": n,
+            "segment": "sanatos",
+            "red_flags_active": [],
+            "iris_reasoning": "AI dezactivat — scor neutru 75.",
+            "weekly_trajectories": [],
+            "trajectory_events": [],
+        }
+        return {
+            "satisfaction_pct": 75.0,
+            "is_unsatisfied": False,
+            "breakdown": breakdown,
+            "config_used": config_used,
+            "computed_at": now.isoformat(),
+        }
+
+    def _item_dt(item: dict) -> Optional[datetime]:
+        raw = item.get("occurred_at") or item.get("date")
+        if raw is None:
+            return None
+        if isinstance(raw, datetime):
+            return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+        s = str(raw).strip()
+        if not s:
+            return None
+        try:
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s[:19] if "T" in s[:19] or len(s) >= 19 else s[:10])
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except Exception:
             try:
-                n_recontacts = int(rc.get("count") or 0)
-            except (TypeError, ValueError):
-                n_recontacts = 0
-            rl = rc.get("recontacts")
-            if isinstance(rl, list):
-                recontact_detail = rl[:20]
-                # count = len(lista), consecvent cu prompt-ul
-                n_recontacts = min(n_recontacts, len(rl)) if rl else n_recontacts
-                if not n_recontacts and rl:
-                    n_recontacts = len(rl)
+                dt = datetime.strptime(s[:10], "%Y-%m-%d")
+                return dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                return None
 
-    pen_recontact = n_recontacts * cfg["pen_recontact"]
-    emotion_final = _clamp(emotion_base - pen_recontact)
-    penalties_total = emo_sub["penalties_category"] + pen_recontact
+    def _week_key(dt: datetime) -> str:
+        iso = dt.astimezone(timezone.utc).isocalendar()
+        return f"{iso.year}-W{iso.week:02d}"
 
-    # ── Apel IRIS #2: context holistic (30%) ────────────────────────────────────
-    context_pct = None
-    ctx_reasoning = ""
-    ctx_dominant = ""
-    ctx_trend = ""
-    if use_ai:
-        cx = _iris_call(_V4_CONTEXT_SYSTEM, {
-            "total_interactiuni": n,
-            "interactiuni": _iris_payload_interactions(received, sent),
-        }, max_tokens=500)
-        if cx and "context_pct" in cx:
+    def _week_bounds(dt: datetime) -> Tuple[datetime, datetime]:
+        # luni 00:00 UTC → luni următoare
+        d = dt.astimezone(timezone.utc)
+        monday = (d - timedelta(days=d.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        return monday, monday + timedelta(days=7)
+
+    def _bucket_weeks(recv: List[dict], snd: List[dict]) -> List[dict]:
+        buckets: Dict[str, dict] = {}
+        order: List[str] = []
+        for kind, items in (("received", recv), ("sent", snd)):
+            for it in items:
+                dt = _item_dt(it) or month_start
+                wk = _week_key(dt)
+                if wk not in buckets:
+                    w0, w1 = _week_bounds(dt)
+                    # clip to month window
+                    w0 = max(w0, month_start if month_start.tzinfo else month_start.replace(tzinfo=timezone.utc))
+                    w1 = min(w1, month_end if month_end.tzinfo else month_end.replace(tzinfo=timezone.utc))
+                    buckets[wk] = {"week_key": wk, "start": w0, "end": w1, "received": [], "sent": []}
+                    order.append(wk)
+                buckets[wk][kind].append(it)
+        return [buckets[k] for k in order]
+
+    def _parse_iris(parsed: Optional[dict]) -> dict:
+        if not isinstance(parsed, dict):
+            return {"ok": False}
+        raw_pct = parsed.get("satisfaction_pct", None)
+        pct = None
+        if raw_pct is not None and str(raw_pct).strip().lower() not in ("", "null", "none", "n/a", "na"):
             try:
-                context_pct = _clamp(float(cx["context_pct"]))
-                ctx_reasoning = cx.get("reasoning", "") or ""
-                ctx_dominant = cx.get("dominant_signal", "") or ""
-                ctx_trend = cx.get("trend_assessment", "") or ""
+                pct = round(_clamp(float(raw_pct)), 1)
             except (TypeError, ValueError):
-                context_pct = None
+                pct = None
+        events = parsed.get("trajectory_events") if isinstance(parsed.get("trajectory_events"), list) else []
+        return {
+            "ok": True,
+            "satisfaction_pct": pct,
+            "no_score_label": parsed.get("no_score_label") or None,
+            "no_score_note": parsed.get("no_score_note") or None,
+            "category": parsed.get("category") or None,
+            "trajectory_shape": parsed.get("trajectory_shape"),
+            "reasoning": parsed.get("reasoning") or "",
+            "trajectory_events": events[:50],
+            "reputation_risks": parsed.get("reputation_risks") if isinstance(parsed.get("reputation_risks"), list) else [],
+            "escalation_risks": parsed.get("escalation_risks") if isinstance(parsed.get("escalation_risks"), list) else [],
+            "financial_risk": parsed.get("financial_risk") if isinstance(parsed.get("financial_risk"), dict) else parsed.get("financial_risk"),
+            "suggestions": parsed.get("suggestions") if isinstance(parsed.get("suggestions"), list) else [],
+        }
 
-    if context_pct is None:
-        # IRIS indisponibil/eșec → context neutru fix (nu amplifica scorul de emoție)
-        context_pct = 75.0
-        ctx_reasoning = "Context IRIS indisponibil — folosit scor neutru 75."
-        ctx_dominant = "indisponibil"
-        ctx_trend = "necunoscut"
+    def _run_iris(period_label: str, period: dict, recv: List[dict], snd: List[dict], extra: Optional[dict] = None) -> dict:
+        payload = {
+            "perioada": period,
+            "nivel_analiza": period_label,
+            "instructiune": (
+                f"Analizează traiectoria de satisfacție la nivel de {period_label} pentru ACEST client. "
+                "Interacțiunile de mai jos sunt [TRANSCRIEREA CONVERSAȚIEI] (apeluri + emailuri), "
+                "ordonate cronologic. Respectă promptul de sistem V4. "
+                "Nu folosi scoruri memorate/cache — evaluează DOAR pe textul furnizat."
+            ),
+            "total_interactiuni": len(recv) + len(snd),
+            "interactiuni": _iris_payload_interactions(recv, snd, text_limit=2500),
+        }
+        if extra:
+            payload.update(extra)
+        return _parse_iris(_iris_call(_load_trajectory_v4_system(), payload, max_tokens=4000))
 
-    # ── Combinare 70/30 ─────────────────────────────────────────────────────────
-    combined = _clamp(emotion_final * cfg["w_emotion"] + context_pct * cfg["w_context"])
+    system = _load_trajectory_v4_system()  # warm cache local file; IRIS call remains no_cache
+    _ = system
 
-    # ── Apel IRIS #3: restituire (≤50% din penalizări), aplicat pe scorul final ──
-    recovery_pct = 0.0
-    recovery_reasoning = ""
-    restituit = 0.0
-    if use_ai and penalties_total > 0:
-        rv = _iris_call(_V4_RECOVERY_SYSTEM, {
-            "penalizari_total": round(penalties_total, 1),
-            "detalii_penalizari": {
-                "sesizari": emo_sub["n_sesizari"],
-                "reclamatii": emo_sub["n_reclamatii"],
-                "reveniri_nerezolvat": n_recontacts,
-            },
-            "interactiuni": _iris_payload_interactions(received, sent),
-        }, max_tokens=400)
-        if rv and "recovery_pct" in rv:
-            try:
-                recovery_pct = max(0.0, min(cfg["recovery_max"], float(rv["recovery_pct"])))
-                recovery_reasoning = rv.get("reasoning", "") or ""
-            except (TypeError, ValueError):
-                recovery_pct = 0.0
-        restituit = round(penalties_total * recovery_pct, 1)
+    weeks = _bucket_weeks(received, sent)
+    weekly_rows: List[dict] = []
+    merged_events: List[dict] = []
+    iris_calls = 0
 
-    final_pct = round(_clamp(combined + restituit), 1)
-    is_unsatisfied = final_pct < 70.0
-    segment = _segment(final_pct)
+    for i, wb in enumerate(weeks):
+        w_recv, w_sent = wb["received"], wb["sent"]
+        if not w_recv and not w_sent:
+            continue
+        period = {
+            "week_key": wb["week_key"],
+            "week_start": wb["start"].date().isoformat(),
+            "week_end_exclusive": wb["end"].date().isoformat(),
+        }
+        wres = _run_iris("saptamana", period, w_recv, w_sent)
+        iris_calls += 1
+        row = {
+            "week_key": wb["week_key"],
+            "week_start": period["week_start"],
+            "week_end_exclusive": period["week_end_exclusive"],
+            "n_interactions": len(w_recv) + len(w_sent),
+            "satisfaction_pct": wres.get("satisfaction_pct"),
+            "category": wres.get("category") or wres.get("no_score_label"),
+            "trajectory_shape": wres.get("trajectory_shape"),
+            "iris_reasoning": wres.get("reasoning") or wres.get("no_score_note") or "",
+            "no_score_label": wres.get("no_score_label"),
+            "trajectory_events": wres.get("trajectory_events") or [],
+            "iris_ok": bool(wres.get("ok")),
+        }
+        weekly_rows.append(row)
+        for ev in (wres.get("trajectory_events") or []):
+            if isinstance(ev, dict):
+                ev = dict(ev)
+                ev.setdefault("week_key", wb["week_key"])
+                merged_events.append(ev)
+        if i < len(weeks) - 1:
+            _time.sleep(0.4)
 
+    week_summaries = [
+        {
+            "week_key": r["week_key"],
+            "satisfaction_pct": r["satisfaction_pct"],
+            "category": r["category"],
+            "trajectory_shape": r["trajectory_shape"],
+            "reasoning": (r.get("iris_reasoning") or "")[:400],
+            "n_interactions": r["n_interactions"],
+        }
+        for r in weekly_rows
+    ]
+
+    month_period = {
+        "month_start": month_start.date().isoformat() if hasattr(month_start, "date") else str(month_start)[:10],
+        "month_end_exclusive": month_end.date().isoformat() if hasattr(month_end, "date") else str(month_end)[:10],
+    }
+    mres = _run_iris(
+        "luna",
+        month_period,
+        received,
+        sent,
+        extra={
+            "rezumate_saptamanale_deja_analizate": week_summaries,
+            "nota": (
+                "Ai mai sus rezultatele IRIS pe săptămâni (fără cache). "
+                "Starea finală a LUNII trebuie să reflecte traiectoria pe toată perioada, "
+                "ponderată spre ultimele evenimente relevante — nu media aritmetică a săptămânilor."
+            ),
+        },
+    )
+    iris_calls += 1
+
+    if not mres.get("ok"):
+        # fallback: ultima săptămână cu scor
+        fallback_pct = None
+        for r in reversed(weekly_rows):
+            if r.get("satisfaction_pct") is not None:
+                fallback_pct = r["satisfaction_pct"]
+                break
+        if fallback_pct is None:
+            breakdown = {
+                "scoring_mode": "v4_trajectory_iris_fail",
+                "single_kpi": "iris_stare_finala",
+                "total_interactions": n,
+                "segment": "sanatos",
+                "red_flags_active": [],
+                "iris_reasoning": "IRIS indisponibil/eșec pe lună — scor neutru 75.",
+                "weekly_trajectories": weekly_rows,
+                "trajectory_events": merged_events[:80],
+                "iris_calls": iris_calls,
+            }
+            return {
+                "satisfaction_pct": 75.0,
+                "is_unsatisfied": False,
+                "breakdown": breakdown,
+                "config_used": config_used,
+                "computed_at": now.isoformat(),
+            }
+        mres = {
+            "ok": True,
+            "satisfaction_pct": fallback_pct,
+            "category": "Fallback din ultima săptămână scorată",
+            "trajectory_shape": None,
+            "reasoning": "Apelul lunar IRIS a eșuat — folosită starea finală a ultimei săptămâni analizate.",
+            "trajectory_events": merged_events,
+            "reputation_risks": [],
+            "escalation_risks": [],
+            "financial_risk": None,
+            "suggestions": [],
+            "no_score_label": None,
+            "no_score_note": None,
+        }
+
+    pct = mres.get("satisfaction_pct")
+    events = mres.get("trajectory_events") or []
+    # Preferă evenimentele săptămânale (mai granulare); completează cu cele lunare dacă lipsesc
+    if merged_events:
+        events = merged_events
+    elif events:
+        events = events[:80]
+    else:
+        events = []
+
+    if pct is None:
+        label = mres.get("no_score_label") or mres.get("category") or "Trafic administrativ, semnal insuficient pentru un scor de satisfacție"
+        note = mres.get("no_score_note") or mres.get("reasoning") or "IRIS nu a putut stabili un scor de satisfacție pe baza semnalului din lună."
+        out = _na_result(label, note, interactions=n, extra={
+            "weekly_trajectories": weekly_rows,
+            "trajectory_events": events[:80],
+            "reputation_risks": mres.get("reputation_risks") or [],
+            "escalation_risks": mres.get("escalation_risks") or [],
+            "financial_risk": mres.get("financial_risk"),
+            "suggestions": (mres.get("suggestions") or [])[:10],
+            "iris_calls": iris_calls,
+        })
+        return out
+
+    is_unsatisfied = pct < 70.0
+    segment = _segment(pct)
+    reasoning = mres.get("reasoning") or ""
+    category = mres.get("category")
+    shape = mres.get("trajectory_shape")
     breakdown = {
-        "scoring_mode": "v4" if use_ai else "v4_no_ai",
+        "scoring_mode": "v4_trajectory",
+        "single_kpi": "iris_stare_finala",
         "total_interactions": n,
         "segment": segment,
         "red_flags_active": [],
+        "iris_reasoning": reasoning,
+        "category": category,
+        "trajectory_shape": shape,
+        "trajectory_events": events[:80],
+        "weekly_trajectories": weekly_rows,
+        "no_score_label": None,
+        "no_score_note": None,
+        "reputation_risks": mres.get("reputation_risks") or [],
+        "escalation_risks": mres.get("escalation_risks") or [],
+        "financial_risk": mres.get("financial_risk"),
+        "suggestions": (mres.get("suggestions") or [])[:10],
+        "iris_calls": iris_calls,
         "iris_holistic": {
-            "reasoning": ctx_reasoning,
-            "dominant_signal": ctx_dominant,
-            "trend_assessment": ctx_trend,
+            "reasoning": reasoning,
+            "dominant_signal": category or "",
+            "trend_assessment": shape or "",
         },
-        "iris_reasoning": ctx_reasoning,
-        "emotion": {
-            "score": round(emotion_final / 100.0, 4),
-            "weight": cfg["w_emotion"],
-            "contribution": round(emotion_final * cfg["w_emotion"] / 100.0, 4),
-            "data_points": n,
-            "sub": {
-                "n_sesizari": emo_sub["n_sesizari"],
-                "n_reclamatii": emo_sub["n_reclamatii"],
-                "n_informatie": emo_sub["n_informatie"],
-                "recontacts": n_recontacts,
-                "penalties_category": emo_sub["penalties_category"],
-                "penalties_recontact": round(pen_recontact, 1),
-            },
-        },
-        "iris_context": {
-            "score": round(context_pct / 100.0, 4),
-            "weight": cfg["w_context"],
-            "contribution": round(context_pct * cfg["w_context"] / 100.0, 4),
-            "data_points": n,
-        },
-        "recovery": {
-            "penalties_total": round(penalties_total, 1),
-            "recovery_pct": round(recovery_pct, 3),
-            "restituit": restituit,
-            "reasoning": recovery_reasoning,
-        },
-        "recontact_detail": recontact_detail,
-        "combined_before_recovery": round(combined, 1),
     }
-
     return {
-        "satisfaction_pct": final_pct,
+        "satisfaction_pct": pct,
         "is_unsatisfied": is_unsatisfied,
         "breakdown": breakdown,
-        "config_used": {"version": "v4", "weights": cfg},
+        "config_used": config_used,
         "computed_at": now.isoformat(),
     }

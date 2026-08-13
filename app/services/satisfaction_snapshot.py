@@ -23,10 +23,10 @@ from app.services import satisfaction_engine
 
 logger = logging.getLogger("mailguard.satisfaction_snapshot")
 
-BATCH_SIZE = 100
+BATCH_SIZE = 5  # flush des — UI vede progresul pe rulări selective / preview
 
 # Rate-limit apeluri IRIS AI: pauză între clienți ca să nu bombardăm gateway-ul
-# (fiecare client cu activitate face 2-3 apeluri IRIS in compute_satisfaction_v4).
+# (fiecare client cu activitate face 1 apel IRIS in compute_satisfaction_v4 / traiectorie V4).
 AI_CALL_SPACING_SECONDS = 1.0
 
 
@@ -200,10 +200,12 @@ def run_monthly_snapshot(
                 if has_act:
                     # v4: fereastră strict calendaristică [start, end)
                     result = satisfaction_engine.compute_satisfaction_v4(client_id, iris_client_id, cur, start, end)
-                    if (result.get("breakdown") or {}).get("scoring_mode") == "v4":
-                        stats["ai_calls"] = stats.get("ai_calls", 0) + 1
-                        # Rate-limit: pauză după fiecare client care a folosit AI-ul IRIS,
-                        # ca sa nu bombardam gateway-ul (fiecare client = 2-3 apeluri IRIS).
+                    mode = (result.get("breakdown") or {}).get("scoring_mode") or ""
+                    # v4_trajectory = IRIS week+month (fără cache); legacy v4 = 2-3 apeluri
+                    if mode in ("v4", "v4_trajectory", "v4_trajectory_na") or str(mode).startswith("v4_trajectory"):
+                        n_calls = int((result.get("breakdown") or {}).get("iris_calls") or 1)
+                        stats["ai_calls"] = stats.get("ai_calls", 0) + n_calls
+                        # Rate-limit: pauză după fiecare client (apelurile intra-client au deja spacing în engine)
                         time.sleep(AI_CALL_SPACING_SECONDS)
                     pct = result.get("satisfaction_pct")
                     carry_forward = False
@@ -212,7 +214,7 @@ def run_monthly_snapshot(
                     is_unsatisfied = result.get("is_unsatisfied", False)
                     config_used = result.get("config_used", {})
 
-                    if pct is None:
+                    if pct is None and not (breakdown or {}).get("store_null"):
                         # Motor a calculat dar fără date — încearcă carry-forward
                         has_act = False
 
